@@ -1,4 +1,4 @@
-# SCI-Risk-Nomogram: A Cost-Effective Model for Systemic Chronic Inflammation
+# Development and Internal Validation of a Multivariable Nomogram for Systemic Chronic Inflammation: A Population-Based Machine Learning Study
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![R Version](https://img.shields.io/badge/R-%3E%3D%204.3.0-blue)](https://www.r-project.org/)
