@@ -11,7 +11,9 @@ To ensure absolute methodological transparency and local computational reproduci
 
 **Primary Working Directory:** `/Users/bing/AA`
 
-Please ensure that your local R Studio working directory is set to this absolute path before executing the master script. The script will automatically generate the following sub-directories upon initialization:
+Please note that the master script is configured to run within a specific absolute root directory by default. **For external peer-reviewers and users:** please ensure you update the `setwd("/Users/bing/AA")` command at the very beginning of the master script to match your own local repository path before execution. 
+
+Upon initialization, the script will automatically generate the following sub-directories to organize the outputs seamlessly:
 * `/results/data/`: Outputs of all cleaned CSVs, engineered features, and statistical tables (e.g., Table 1).
 * `/results/plots/`: High-resolution PDFs for all clinical charts (RCS curves, Nomograms, Calibration Curves, DCA).
 
