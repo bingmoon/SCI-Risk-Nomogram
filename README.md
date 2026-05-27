@@ -1,33 +1,33 @@
-# Development and Internal Validation of a Multivariable Nomogram for Systemic Chronic Inflammation: A Population-Based Machine Learning Study
+# SCI-Risk-Nomogram: Machine Learning for Systemic Chronic Inflammation
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
-[![R Version](https://img.shields.io/badge/R-%3E%3D%204.3.0-blue)](https://www.r-project.org/)
-[![Data](https://img.shields.io/badge/Data-NHANES%202017--2018-green)](https://wwwn.cdc.gov/nchs/nhanes/)
+[![R Version](https://img.shields.io/badge/R-4.2.2-green.svg)](https://www.r-project.org/)
 
 ## Overview
-This repository contains the complete analytical pipeline, feature engineering datasets, and master R script for the manuscript: **"A Cost-Effective Multivariable Nomogram for Predicting Systemic Chronic Inflammation: Implications for Outpatient Screening and Surgical Prehabilitation"**. 
+This repository contains the complete, reproducible analytical pipeline (R code and feature engineering scripts) for the manuscript: **"Development and Internal Validation of a Multivariable Nomogram for Systemic Chronic Inflammation: A Population-Based Machine Learning Study."** Our study integrates machine learning (Random Forest & SHAP) with traditional epidemiological modeling (Restricted Cubic Splines & DCA) to evaluate the threshold-dependent protective effect of the dietary stearic-to-palmitic acid (18:0/16:0) ratio on systemic chronic inflammation (hs-CRP > 3 mg/L).
 
-The study leverages interpretable machine learning (SHAP) and restricted cubic splines (RCS) to construct a non-invasive, high-performance clinical nomogram integrating the dietary stearic-to-palmitic acid (18:0/16:0) ratio with established immune-metabolic baselines (TyG and SII indices).
+## Directory Structure & Working Environment
+To ensure absolute methodological transparency and local computational reproducibility, all R scripts are structurally designed to be executed within a fixed absolute root directory.
 
-## Repository Structure
-- `analysis_master_script.R`: The core executable script. It encompasses the entire workflow from NHANES data fetching, table generation, machine learning (Random Forest & SHAP), RCS dose-response analysis, nomogram construction, internal validation (Bootstrap), to Decision Curve Analysis (DCA).
-- `data/`: Contains the processed datasets required to replicate the statistical models.
-  - `Stage1_NHANES_Cleaned_Raw.csv`: Cleaned foundational cohort data.
-  - `Stage2_Features_Engineered.csv`: Engineered dataset including calculated composite indices (TyG, SII) and lipid ratios.
+**Primary Working Directory:** `/Users/bing/AA`
 
-## Computational Reproducibility
-To ensure absolute methodological transparency, a fixed random seed (`set.seed(2026)`) is uniformly applied across all stochastic algorithms (including Random Forest tree generation, SHAP Monte Carlo simulations, and bootstrap resampling). Reviewers and researchers can execute the master script to reproduce identical figures, C-indices, and P-values reported in the manuscript.
+Please ensure that your local R Studio working directory is set to this absolute path before executing the master script. The script will automatically generate the following sub-directories upon initialization:
+* `/results/data/`: Outputs of all cleaned CSVs, engineered features, and statistical tables (e.g., Table 1).
+* `/results/plots/`: High-resolution PDFs for all clinical charts (RCS curves, Nomograms, Calibration Curves, DCA).
 
-### Prerequisites
-The analysis was performed using **R software (version 4.3.x or higher)**. The script automatically checks and installs the necessary packages via `pacman`. Key dependencies include:
-- `nhanesA` (Data retrieval)
-- `tableone` (Baseline characteristics)
-- `randomForest`, `fastshap`, `shapviz` (Machine learning & Interpretability)
-- `rms` (RCS integration & Nomogram construction)
-- `dcurves` (Decision Curve Analysis)
-- `ggplot2`, `dplyr`, `tidyr` (Data manipulation & Visualization)
+## Analytical Pipeline (Master Script)
+The entire analysis is consolidated into a single, seamless master script. The pipeline is structured into 7 sequential stages:
+1. **Stage 1:** Data retrieval from the NHANES (2017-2018) database, extraction of complex covariates (handling Skip Patterns), and baseline Table 1 generation.
+2. **Stage 2:** Feature engineering (TyG and SII indices) and initial Random Forest modeling.
+3. **Stage 3:** Black-box interpretability analysis using SHapley Additive exPlanations (SHAP) to ascertain feature directionality.
+4. **Stage 4:** Non-linear dose-response assessment utilizing Restricted Cubic Splines (RCS).
+5. **Stage 5:** Construction and bootstrap-based internal validation (Calibration & C-index) of the clinical nomogram.
+6. **Stage 6:** Clinical net benefit evaluation via Decision Curve Analysis (DCA).
+7. **Stage 7:** Complete-case sensitivity analyses (Energy adjustment, stringent hs-CRP thresholding, and massive confounder adjustment).
 
-### How to Run
-1. Clone this repository to your local machine:
-   ```bash
-   git clone [https://github.com/bingmoon/SCI-Risk-Nomogram.git](https://github.com/bingmoon/SCI-Risk-Nomogram.git)
+## Dependencies
+* Core modeling: `randomForest`, `fastshap`, `shapviz`, `rms`, `dcurves`
+* Data processing & Visualization: `nhanesA`, `dplyr`, `tidyr`, `ggplot2`, `tableone`
+
+## Contact & Correspondence
+For any inquiries regarding the code, data engineering logic, or statistical methodology, please contact the corresponding author via official institutional academic email channels. The use of personal email addresses for academic correspondence regarding this repository is strictly prohibited.
