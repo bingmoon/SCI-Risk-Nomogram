@@ -1,6 +1,6 @@
-# Dietary Stearic-to-Palmitic Acid Ratio and Systemic Inflammation: A Dual-Track Analysis from Observational Associations to Clinical Prediction
+# Dietary Stearic-to-Palmitic Acid Ratio and Systemic Inflammation]{Dietary Stearic-to-Palmitic Acid Ratio and Systemic Inflammation: A Dual-Track Analysis Integrating Observational Associations with a Machine Learning-Derived Clinical Prediction Nomogram
 
-Welcome to the official repository for the **Dual-Track SCI Nomogram** project. This repository contains the complete replication code, data schemas, and analytical pipelines for our study investigating the observational association between micro-level dietary saturated fatty acid imbalances (stearic acid 18:0 to palmitic acid 16:0 ratio) and systemic chronic inflammation (SCI), as well as the development of a parsimonious clinical screening tool.
+Welcome to the official repository for the **SCI-Risk-Nomogram** project. This repository contains the complete replication code, data schemas, and analytical pipelines for our study investigating the observational association between micro-level dietary saturated fatty acid imbalances (stearic acid 18:0 to palmitic acid 16:0 ratio) and systemic chronic inflammation (SCI), as well as the development of a parsimonious clinical screening tool.
 
 ---
 
