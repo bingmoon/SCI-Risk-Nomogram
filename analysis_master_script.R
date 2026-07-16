@@ -1,885 +1,1034 @@
-
 # ==============================================================================
-# 项目名称：AB (基于三明治架构的双周期合并队列研究)
-# 当前阶段：一、基线构建与脂肪酸全谱解码
-# 步骤：1 & 2 (数据提取与清洗) & 3 (Table 1 构建)
-# 工作目录：/Users/bing/AA/AB
+# Project: Dual-Track Analysis of Dietary 18:0/16:0 Ratio and Systemic Inflammation
+# Final Complete Version – All fixes integrated:
+#   - dplyr::select used everywhere
+#   - Robust Gender conversion
+#   - Manual E-value calculation
+#   - LASSO dummy variable mapping back to original factors
+#   - CHARLS smoking variable removed (fallback-safe)
 # ==============================================================================
 
-# ------------------------------------------------------------------------------
-# 一_1：初始化环境与多维原始数据拉取
-# ------------------------------------------------------------------------------
-dir.create("/Users/bing/AA/AB", recursive = TRUE, showWarnings = FALSE)
-setwd("/Users/bing/AA/AB")
-
-dir.create("results_一", showWarnings = FALSE)
-dir.create("results_一/data", showWarnings = FALSE)
-dir.create("results_一/plots", showWarnings = FALSE)
+# 0. Environment setup ---------------------------------------------------------
+rm(list = ls())
+set.seed(2026)
 
 if (!require("pacman")) install.packages("pacman")
-p_load(nhanesA, dplyr, tidyr, tableone)
+library(pacman)
+p_load(
+  nhanesA, dplyr, tidyr, tableone, rms, ggplot2, broom,
+  MatchIt, survey, psych, mediation, glmnet, caret,
+  pROC, Hmisc, ResourceSelection, car, haven, dcurves, survival
+)
 
-message(">>> [一_1] 启动 2015-2018 双周期底层原始数据拉取 (含脂肪酸全谱)...")
+# Set working directory (adjust as needed)
+setwd("/Users/bing/AA/AB_revision")
+dir.create("data", showWarnings = FALSE, recursive = TRUE)
+dir.create("results", showWarnings = FALSE, recursive = TRUE)
+dir.create("results/figures", showWarnings = FALSE, recursive = TRUE)
+dir.create("results/tables", showWarnings = FALSE, recursive = TRUE)
 
+# 1. NHANES data extraction ---------------------------------------------------
 pull_cycle_data <- function(cycle) {
-  demo <- nhanes(paste0('DEMO_', cycle)) %>% select(SEQN, RIDAGEYR, RIAGENDR, RIDRETH1, INDFMPIR)
+  demo <- nhanes(paste0('DEMO_', cycle)) %>%
+    dplyr::select(SEQN, RIDAGEYR, RIAGENDR, RIDRETH1, INDFMPIR)
   
-  # 强烈扩增：拉取总脂肪及主要个别脂肪酸，为 PCA 降维做准备
-  diet <- nhanes(paste0('DR1TOT_', cycle)) %>% 
-    select(SEQN, DR1TKCAL, DR1TALCO, DR1TFIBE, DR1TSUGR, # 基础营养与添加糖
-           DR1TTFAT, DR1TSFAT, DR1TMFAT, DR1TPFAT,       # 大类脂肪
-           DR1TS140, DR1TS160, DR1TS180,                 # 饱和类细分
-           DR1TM181, DR1TP182, DR1TP183, DR1TP204, DR1TP205, DR1TP226) # 单/多不饱和细分 (含EPA/DHA)
-           
-  crp  <- nhanes(paste0('HSCRP_', cycle)) %>% select(SEQN, LBXHSCRP)
-  bmx  <- nhanes(paste0('BMX_', cycle)) %>% select(SEQN, BMXBMI)
-  smq  <- nhanes(paste0('SMQ_', cycle)) %>% select(SEQN, SMQ020, SMQ040)
-  diq  <- nhanes(paste0('DIQ_', cycle)) %>% select(SEQN, DIQ010)
-  bpq  <- nhanes(paste0('BPQ_', cycle)) %>% select(SEQN, BPQ020)
-  paq  <- nhanes(paste0('PAQ_', cycle)) %>% select(SEQN, any_of(c("PAQ610", "PAD615", "PAQ625", "PAD630", "PAQ640", "PAD645", "PAQ655", "PAD660", "PAQ670", "PAD675")))
+  diet <- nhanes(paste0('DR1TOT_', cycle)) %>%
+    dplyr::select(SEQN, DR1TKCAL, DR1TALCO, DR1TFIBE,
+                  DR1TTFAT, DR1TSFAT, DR1TMFAT, DR1TPFAT,
+                  DR1TS140, DR1TS160, DR1TS180,
+                  DR1TM181, DR1TP182, DR1TP183, DR1TP204, DR1TP205, DR1TP226)
   
-  # 生化/血常规 (留作后续中介分析与模型构建)
-  glu <- nhanes(paste0('GLU_', cycle)) %>% select(SEQN, LBXGLU)
-  tg  <- nhanes(paste0('TRIGLY_', cycle)) %>% select(SEQN, LBXTR)
-  cbc <- nhanes(paste0('CBC_', cycle)) %>% select(SEQN, LBXPLTSI, LBDNENO, LBDLYMNO)
+  crp  <- nhanes(paste0('HSCRP_', cycle)) %>% dplyr::select(SEQN, LBXHSCRP)
+  bmx  <- nhanes(paste0('BMX_', cycle)) %>% dplyr::select(SEQN, BMXBMI)
+  smq  <- nhanes(paste0('SMQ_', cycle)) %>% dplyr::select(SEQN, SMQ020, SMQ040)
+  diq  <- nhanes(paste0('DIQ_', cycle)) %>% dplyr::select(SEQN, DIQ010)
+  bpq  <- nhanes(paste0('BPQ_', cycle)) %>% dplyr::select(SEQN, BPQ020)
+  paq  <- nhanes(paste0('PAQ_', cycle)) %>%
+    dplyr::select(SEQN, any_of(c("PAQ610", "PAD615", "PAQ625", "PAD630",
+                                 "PAQ640", "PAD645", "PAQ655", "PAD660",
+                                 "PAQ670", "PAD675")))
   
-  df_merge <- demo %>%
-    left_join(diet, by = "SEQN") %>% left_join(crp, by = "SEQN") %>%
-    left_join(bmx, by = "SEQN") %>% left_join(smq, by = "SEQN") %>%
-    left_join(diq, by = "SEQN") %>% left_join(bpq, by = "SEQN") %>%
-    left_join(paq, by = "SEQN") %>% left_join(glu, by = "SEQN") %>%
-    left_join(tg, by = "SEQN") %>% left_join(cbc, by = "SEQN")
+  glu <- nhanes(paste0('GLU_', cycle)) %>% dplyr::select(SEQN, LBXGLU)
+  tg  <- nhanes(paste0('TRIGLY_', cycle)) %>% dplyr::select(SEQN, LBXTR)
+  cbc <- nhanes(paste0('CBC_', cycle)) %>%
+    dplyr::select(SEQN, LBXPLTSI, LBDNENO, LBDLYMNO)
   
-  return(df_merge)
+  demo %>%
+    left_join(diet, by = "SEQN") %>%
+    left_join(crp, by = "SEQN") %>%
+    left_join(bmx, by = "SEQN") %>%
+    left_join(smq, by = "SEQN") %>%
+    left_join(diq, by = "SEQN") %>%
+    left_join(bpq, by = "SEQN") %>%
+    left_join(paq, by = "SEQN") %>%
+    left_join(glu, by = "SEQN") %>%
+    left_join(tg, by = "SEQN") %>%
+    left_join(cbc, by = "SEQN")
 }
 
-df_raw_I <- pull_cycle_data("I") # 15-16
-df_raw_J <- pull_cycle_data("J") # 17-18
-df_stage_一_1_raw <- bind_rows(df_raw_I, df_raw_J)
+df_I <- pull_cycle_data("I")
+df_J <- pull_cycle_data("J")
+nhanes_raw <- bind_rows(df_I, df_J)
 
-
-# ------------------------------------------------------------------------------
-# 一_2：严苛清洗与变量衍生 (分离混杂与中介)
-# ------------------------------------------------------------------------------
-message(">>> [一_2] 执行核心变量清洗与连续型暴露衍化...")
-
-df_stage_一_2_clean <- df_stage_一_1_raw %>%
+# Data cleaning and variable derivation
+nhanes_clean <- nhanes_raw %>%
   drop_na(RIDAGEYR, RIAGENDR, DR1TS180, DR1TS160, LBXHSCRP) %>%
   filter(RIDAGEYR >= 20, LBXHSCRP <= 10, DR1TS160 > 0, DR1TS180 > 0) %>%
   mutate(
-    # --- 核心主线变量 ---
-    Ratio_18_16 = DR1TS180 / (DR1TS160 + 0.0001), 
-    High_CRP = factor(ifelse(LBXHSCRP > 3, "Yes", "No"), levels = c("No", "Yes")),
+    Ratio_18_16 = DR1TS180 / (DR1TS160 + 0.0001),
     High_CRP_num = ifelse(LBXHSCRP > 3, 1, 0),
+    High_CRP     = factor(High_CRP_num, levels = c(0,1), labels = c("No","Yes")),
     
-    # --- 人口学与体格 (混杂层) ---
-    Age = RIDAGEYR,
-    Gender = factor(RIAGENDR, levels = c(1, 2), labels = c("Male", "Female")),
-    Race = factor(RIDRETH1),
-    PIR = ifelse(is.na(INDFMPIR), median(INDFMPIR, na.rm = TRUE), INDFMPIR),
-    BMI = ifelse(is.na(BMXBMI), median(BMXBMI, na.rm = TRUE), BMXBMI),
+    Age      = RIDAGEYR,
+    Gender_raw = RIAGENDR,
+    Race     = factor(RIDRETH1),
+    PIR      = ifelse(is.na(INDFMPIR), median(INDFMPIR, na.rm = TRUE), INDFMPIR),
+    BMI      = ifelse(is.na(BMXBMI), median(BMXBMI, na.rm = TRUE), BMXBMI),
     
-    # --- 膳食与生活方式 (混杂层) ---
     Energy_Kcal = ifelse(is.na(DR1TKCAL), median(DR1TKCAL, na.rm = TRUE), DR1TKCAL),
-    Total_Fat = ifelse(is.na(DR1TTFAT), median(DR1TTFAT, na.rm = TRUE), DR1TTFAT),
-    Fiber = ifelse(is.na(DR1TFIBE), median(DR1TFIBE, na.rm = TRUE), DR1TFIBE),
-    Alcohol_g = ifelse(is.na(DR1TALCO), 0, DR1TALCO),
+    Total_Fat   = ifelse(is.na(DR1TTFAT), median(DR1TTFAT, na.rm = TRUE), DR1TTFAT),
+    Fiber       = ifelse(is.na(DR1TFIBE), median(DR1TFIBE, na.rm = TRUE), DR1TFIBE),
+    Alcohol_g   = ifelse(is.na(DR1TALCO), 0, DR1TALCO),
     
     Smoking = factor(case_when(
-      as.character(SMQ020) %in% c("2", "No") ~ "Never",
-      as.character(SMQ020) %in% c("1", "Yes") & as.character(SMQ040) %in% c("1", "2", "Every day", "Some days") ~ "Current",
+      as.character(SMQ020) %in% c("2","No") ~ "Never",
+      as.character(SMQ020) %in% c("1","Yes") & 
+        as.character(SMQ040) %in% c("1","2","Every day","Some days") ~ "Current",
       TRUE ~ "Former/Unknown"
+    ), levels = c("Never", "Current", "Former/Unknown")),
+    
+    MET_min_week = (
+      replace_na(ifelse(PAQ610 %in% 1:7, PAQ610, 0), 0) * 
+        replace_na(ifelse(PAD615 < 7777, PAD615, 0), 0) * 8 +
+      replace_na(ifelse(PAQ625 %in% 1:7, PAQ625, 0), 0) * 
+        replace_na(ifelse(PAD630 < 7777, PAD630, 0), 0) * 4 +
+      replace_na(ifelse(PAQ640 %in% 1:7, PAQ640, 0), 0) * 
+        replace_na(ifelse(PAD645 < 7777, PAD645, 0), 0) * 4 +
+      replace_na(ifelse(PAQ655 %in% 1:7, PAQ655, 0), 0) * 
+        replace_na(ifelse(PAD660 < 7777, PAD660, 0), 0) * 8 +
+      replace_na(ifelse(PAQ670 %in% 1:7, PAQ670, 0), 0) * 
+        replace_na(ifelse(PAD675 < 7777, PAD675, 0), 0) * 4
+    ),
+    MET_imp = ifelse(MET_min_week == 0 | is.na(MET_min_week),
+                     median(MET_min_week[MET_min_week > 0], na.rm = TRUE),
+                     MET_min_week),
+    
+    Diabetes = factor(case_when(
+      as.character(DIQ010) %in% c("1","Yes") ~ "Yes", TRUE ~ "No"
+    )),
+    Hypertension = factor(case_when(
+      as.character(BPQ020) %in% c("1","Yes") ~ "Yes", TRUE ~ "No"
     )),
     
-    MET_min_week = (replace_na(ifelse(PAQ610 %in% 1:7, PAQ610, 0), 0) * replace_na(ifelse(PAD615 < 7777, PAD615, 0), 0) * 8) +  
-                   (replace_na(ifelse(PAQ625 %in% 1:7, PAQ625, 0), 0) * replace_na(ifelse(PAD630 < 7777, PAD630, 0), 0) * 4) +  
-                   (replace_na(ifelse(PAQ640 %in% 1:7, PAQ640, 0), 0) * replace_na(ifelse(PAD645 < 7777, PAD645, 0), 0) * 4) +  
-                   (replace_na(ifelse(PAQ655 %in% 1:7, PAQ655, 0), 0) * replace_na(ifelse(PAD660 < 7777, PAD660, 0), 0) * 8) +  
-                   (replace_na(ifelse(PAQ670 %in% 1:7, PAQ670, 0), 0) * replace_na(ifelse(PAD675 < 7777, PAD675, 0), 0) * 4),
-    MET_imp = ifelse(MET_min_week == 0 | is.na(MET_min_week), median(MET_min_week[MET_min_week > 0], na.rm = TRUE), MET_min_week),
-    
-    # --- 临床共病 (混杂层) ---
-    Diabetes = factor(case_when(as.character(DIQ010) %in% c("1", "Yes") ~ "Yes", TRUE ~ "No")),
-    Hypertension = factor(case_when(as.character(BPQ020) %in% c("1", "Yes") ~ "Yes", TRUE ~ "No")),
-    
-    # --- 宿主基线内环境 (潜在中介/候选预测因子层，留作后用) ---
     TyG_Index = log(LBXTR * LBXGLU / 2),
     SII_Index = (LBXPLTSI * LBDNENO) / (LBDLYMNO + 0.0001)
   )
 
-# 切割四分位数分组
-ratio_q <- quantile(df_stage_一_2_clean$Ratio_18_16, probs = c(0, 0.25, 0.5, 0.75, 1), na.rm = TRUE)
-df_stage_一_2_clean$Ratio_Quartile <- cut(df_stage_一_2_clean$Ratio_18_16, breaks = ratio_q, include.lowest = TRUE, labels = c("Q1", "Q2", "Q3", "Q4"))
-
-# 保存纯净数据
-saveRDS(df_stage_一_2_clean, "results_一/data/Stage_一_2_Cleaned_Cohort.rds")
-message(glue::glue(">>> [一_2] 清洗完毕！最终进入后续流程的样本量：{nrow(df_stage_一_2_clean)}"))
-
-
-# ------------------------------------------------------------------------------
-# 一_3：生成标准描述性基线表 (Table 1)
-# ------------------------------------------------------------------------------
-message(">>> [一_3] 构建基于连续暴露四分位数的 Table 1...")
-
-vars_t1 <- c("Age", "Gender", "Race", "PIR", "BMI", "Smoking", "Alcohol_g", 
-             "MET_imp", "Energy_Kcal", "Total_Fat", "Fiber", 
-             "Diabetes", "Hypertension", "High_CRP")
-
-cat_t1 <- c("Gender", "Race", "Smoking", "Diabetes", "Hypertension", "High_CRP")
-
-tab1 <- CreateTableOne(vars = vars_t1, strata = "Ratio_Quartile", data = df_stage_一_2_clean, factorVars = cat_t1)
-
-cat("\n=================================================================\n")
-cat("📊 Table 1: Baseline Characteristics (Q1 to Q4)\n")
-cat("=================================================================\n")
-print(tab1, nonnormal = c("Age", "PIR", "BMI", "Alcohol_g", "MET_imp", "Energy_Kcal", "Total_Fat", "Fiber"), showAllLevels = FALSE)
-
-tab1_export <- print(tab1, nonnormal = c("Age", "PIR", "BMI", "Alcohol_g", "MET_imp", "Energy_Kcal", "Total_Fat", "Fiber"), quote = FALSE, noSpaces = TRUE, printToggle = FALSE)
-write.csv(tab1_export, file = "results_一/data/Stage_一_3_Table1.csv")
-
-message(">>> 🎉 阶段一前置工作完毕！请确认控制台输出的样本量及结果。")
-# ==========================================================
-# 紧急补丁：修复 Gender 变量全为 NA 的 Bug
-# ==========================================================
-setwd("/Users/bing/AA/AB")
-library(dplyr)
-
-# 1. 重新读取阶段一的数据底座
-df_stage_2 <- readRDS("results_一/data/Stage_一_2_Cleaned_Cohort.rds")
-
-# 2. 极客级修复 Gender (完美兼容字符和数字两种底层格式)
-df_stage_2 <- df_stage_2 %>%
+# ---- Gender emergency patch ----
+nhanes_clean <- nhanes_clean %>%
   mutate(
     Gender = factor(case_when(
-      as.character(RIAGENDR) %in% c("1", "Male") ~ "Male",
-      as.character(RIAGENDR) %in% c("2", "Female") ~ "Female",
-      TRUE ~ "Unknown"
-    ))
-  )
-
-# 3. 覆盖保存回原文件，彻底修复地基
-saveRDS(df_stage_2, "results_一/data/Stage_一_2_Cleaned_Cohort.rds")
-
-# 检查一下是不是有男有女了
-print(table(df_stage_2$Gender, useNA = "ifany"))
-
-message(">>> 🎉 Gender 修复完毕！")
-
-
-
-# ==============================================================================
-# 项目名称：AB
-# 当前阶段：二、核心关联与剂量反应探索
-# 工作目录：/Users/bing/AA/AB
-# ==============================================================================
-
-setwd("/Users/bing/AA/AB")
-dir.create("results_二", showWarnings = FALSE)
-dir.create("results_二/data", showWarnings = FALSE)
-dir.create("results_二/plots", showWarnings = FALSE)
-
-if (!require("pacman")) install.packages("pacman")
-p_load(rms, dplyr, ggplot2, broom)
-
-message(">>> [二_1] 加载阶段一的纯净数据底座...")
-df_stage_2 <- readRDS("results_一/data/Stage_一_2_Cleaned_Cohort.rds")
-
-# ==============================================================================
-# 二_1：连续暴露的 RCS 探路 (确立线性模型的合法性)
-# ==============================================================================
-message(">>> [二_1] 启动 RCS 引擎，检验连续暴露的非线性特征...")
-
-# 设定 rms 包需要的数据分布环境
-dd_ab <- datadist(df_stage_2)
-options(datadist = "dd_ab")
-
-# 构建全校正 RCS 模型 (纳入 Table 1 中所有显著的混杂因素)
-fit_rcs_ab <- lrm(High_CRP_num ~ rcs(Ratio_18_16, 4) + Age + Gender + Race + PIR + 
-                    BMI + Smoking + Alcohol_g + MET_imp + Energy_Kcal + 
-                    Total_Fat + Fiber + Diabetes + Hypertension, 
-                  data = df_stage_2)
-
-cat("\n======================================================\n")
-cat("🔥 RCS ANOVA 检验结果 (重点看 Nonlinear 的 P 值)\n")
-cat("======================================================\n")
-print(anova(fit_rcs_ab))
-
-# ==============================================================================
-# 二_2：连续暴露与分类暴露的主 Logistic 回归 (计算 OR 与 P for trend)
-# ==============================================================================
-message("\n>>> [二_2] 启动经典多因素 Logistic 回归模型计算核心 OR 值...")
-
-# Model 1: 仅调整人口学 (Age, Gender, Race, PIR)
-model1_formula <- "High_CRP_num ~ Ratio_Quartile + Age + Gender + Race + PIR"
-
-# Model 2: Model 1 + 生活方式与膳食 (BMI, Smoking, Alcohol_g, MET_imp, Energy_Kcal, Total_Fat, Fiber)
-model2_formula <- paste(model1_formula, "+ BMI + Smoking + Alcohol_g + MET_imp + Energy_Kcal + Total_Fat + Fiber")
-
-# Model 3 (完全调整): Model 2 + 共病 (Diabetes, Hypertension)
-model3_formula <- paste(model2_formula, "+ Diabetes + Hypertension")
-
-# 运行最终的全校正模型 (Model 3) 提取分类 OR 值
-fit_m3 <- glm(as.formula(model3_formula), data = df_stage_2, family = binomial())
-res_m3 <- tidy(fit_m3, exponentiate = TRUE, conf.int = TRUE) %>% 
-  filter(grepl("Ratio_Quartile", term)) %>%
-  select(term, estimate, conf.low, conf.high, p.value)
-
-# 计算 P for trend (将四分位数作为连续变量带入模型检验线性趋势)
-df_stage_2$Ratio_Quartile_Num <- as.numeric(df_stage_2$Ratio_Quartile)
-trend_formula <- sub("Ratio_Quartile", "Ratio_Quartile_Num", model3_formula)
-fit_trend <- glm(as.formula(trend_formula), data = df_stage_2, family = binomial())
-p_trend <- tidy(fit_trend) %>% filter(term == "Ratio_Quartile_Num") %>% pull(p.value)
-
-cat("\n======================================================\n")
-cat("📊 主分析结果：全校正模型 (Model 3) 下的独立致炎效应\n")
-cat("======================================================\n")
-print(res_m3)
-cat(glue::glue("\n📈 趋势检验 P for trend: {round(p_trend, 4)}\n"))
-
-# 留痕结果
-write.csv(res_m3, "results_二/data/Stage_二_2_Multivariable_Logistic_ORs.csv", row.names = FALSE)
-message(">>> 🎉 阶段二关联分析完毕！数据已留痕。")
-# ==============================================================================
-# 二_3：绘制顶刊级 RCS 剂量反应曲线 (Figure 1)
-# ==============================================================================
-message(">>> [二_3] 正在绘制并导出高分辨率 RCS 剂量反应曲线...")
-
-# 1. 重新设定 datadist，将比值的参考点设为中位数 (OR = 1 的基准)
-ref_val <- median(df_stage_2$Ratio_18_16, na.rm = TRUE)
-dd_ab$limits["Adjust to", "Ratio_18_16"] <- ref_val
-fit_rcs_ab <- update(fit_rcs_ab) # 更新模型以应用新的参考点
-
-# 2. 计算预测值 (转换为 OR 值)
-pred_rcs <- rms::Predict(fit_rcs_ab, Ratio_18_16, ref.zero = TRUE, fun = exp)
-
-# 3. 使用 ggplot2 绘制出版级图表
-p_rcs <- ggplot(pred_rcs) +
-  geom_hline(yintercept = 1, linetype = "dashed", color = "darkred", size = 0.8) + # OR=1 基准线
-  geom_ribbon(aes(x = Ratio_18_16, ymin = lower, ymax = upper), fill = "#0073C2", alpha = 0.2) + # 95% CI 阴影
-  geom_line(aes(x = Ratio_18_16, y = yhat), color = "#0073C2", size = 1.2) + # OR 趋势线
-  theme_classic(base_size = 14) +
-  labs(
-    title = "Dose-Response Relationship between 18:0/16:0 Ratio and High hs-CRP",
-    x = "Dietary 18:0/16:0 Ratio",
-    y = "Odds Ratio (95% CI)"
-  ) +
-  theme(
-    plot.title = element_text(face = "bold", hjust = 0.5, size = 14),
-    axis.title = element_text(face = "bold"),
-    axis.text = element_text(color = "black")
-  ) +
-  # 添加 P for non-linearity 的文本注释 (此处数值为您之前跑出的 0.797)
-  annotate("text", x = max(df_stage_2$Ratio_18_16, na.rm=T) * 0.7, y = max(pred_rcs$upper)*0.8, 
-           label = "P for non-linearity = 0.797", size = 5, fontface = "italic")
-
-# 4. 导出高清 PDF
-pdf("results_二/plots/Stage_二_3_RCS_Curve.pdf", width = 8, height = 6)
-print(p_rcs)
-dev.off()
-message(">>> 🎉 RCS 曲线 (Figure 1) 绘制成功！")
-
-# ==============================================================================
-# 项目名称：AB (三明治架构)
-# 当前阶段：三、敏感性分析与伪因果推断 (极端组分析 Q4 vs Q1) - 终极修复版
-# 工作目录：/Users/bing/AA/AB
-# ==============================================================================
-
-setwd("/Users/bing/AA/AB")
-
-if (!require("pacman")) install.packages("pacman")
-p_load(dplyr, MatchIt, tableone, survey, EValue, broom)
-
-message(">>> [三_1] 加载全样本数据，准备提取极端组 (Q4 vs Q1)...")
-df_stage_2 <- readRDS("results_一/data/Stage_一_2_Cleaned_Cohort.rds")
-
-# 1. 精准提取极端对照组 (Q1 与 Q4)
-df_extreme <- df_stage_2 %>%
-  filter(Ratio_Quartile %in% c("Q1", "Q4")) %>%
-  mutate(
-    # 将 Q4 设为暴露组 (1)，Q1 设为对照组 (0)
-    Exposure_Extreme = ifelse(Ratio_Quartile == "Q4", 1, 0),
-    Exposure_Factor = factor(Exposure_Extreme, levels = c(0, 1), labels = c("Q1", "Q4"))
+      as.character(Gender_raw) %in% c("1", "Male") ~ "Male",
+      as.character(Gender_raw) %in% c("2", "Female") ~ "Female",
+      TRUE ~ NA_character_
+    ), levels = c("Male", "Female"))
   ) %>%
-  droplevels()
+  dplyr::select(-Gender_raw)
 
-message(glue::glue(">>> 极端组 (Q4 vs Q1) 提取完毕，总人数应为：{nrow(df_extreme)}"))
+print(table(nhanes_clean$Gender, useNA = "ifany"))
 
-# ==============================================================================
-# 三_2：倾向性评分匹配 (PSM) - 终极混杂剥离
-# ==============================================================================
-message(">>> [三_2] 启动 PSM 因果推断引擎 (1:1 最邻近匹配)...")
+ratio_q <- quantile(nhanes_clean$Ratio_18_16, probs = c(0,0.25,0.5,0.75,1), na.rm=TRUE)
+nhanes_clean$Ratio_Quartile <- cut(
+  nhanes_clean$Ratio_18_16, breaks = ratio_q, include.lowest = TRUE,
+  labels = c("Q1","Q2","Q3","Q4")
+)
+saveRDS(nhanes_clean, "data/nhanes_clean.rds")
 
-set.seed(2026)
-psm_formula <- Exposure_Extreme ~ Age + Gender + Race + PIR + BMI + Smoking + 
-               Alcohol_g + MET_imp + Energy_Kcal + Total_Fat + Fiber + Diabetes + Hypertension
+# 2. Table 1 ------------------------------------------------------------------
+vars_t1 <- c("Age","Gender","Race","PIR","BMI","Smoking","Alcohol_g",
+             "MET_imp","Energy_Kcal","Total_Fat","Fiber",
+             "Diabetes","Hypertension","High_CRP")
+cat_vars <- c("Gender","Race","Smoking","Diabetes","Hypertension","High_CRP")
+tab1 <- CreateTableOne(vars = vars_t1, strata = "Ratio_Quartile",
+                       data = nhanes_clean, factorVars = cat_vars)
+tab1_csv <- print(tab1, nonnormal = c("Age","PIR","BMI","Alcohol_g","MET_imp",
+                                      "Energy_Kcal","Total_Fat","Fiber"),
+                  quote = FALSE, noSpaces = TRUE, printToggle = FALSE)
+write.csv(tab1_csv, "results/tables/Table1.csv")
 
-psm_model <- matchit(psm_formula, data = df_extreme, method = "nearest", caliper = 0.05)
-matched_data <- match.data(psm_model)
-
-message(glue::glue(">>> 匹配成功！保留了 {nrow(matched_data)} 名极其均衡的患者。"))
-
-# 计算匹配后的真实致炎效应
-design_psm <- svydesign(ids = ~1, weights = ~weights, data = matched_data)
-fit_psm <- svyglm(High_CRP_num ~ Exposure_Factor, design = design_psm, family = binomial())
-res_psm <- tidy(fit_psm, exponentiate = TRUE, conf.int = TRUE) %>% filter(term == "Exposure_FactorQ4")
-
-cat("\n======================================================\n")
-cat("🏆 伪因果推断结果 (PSM: Q4 vs Q1)\n")
-cat("======================================================\n")
-cat(glue::glue("匹配后 OR = {round(res_psm$estimate, 3)} (95% CI: {round(res_psm$conf.low, 3)} - {round(res_psm$conf.high, 3)}), P = {round(res_psm$p.value, 4)}\n"))
-
-# ==============================================================================
-# 三_3：量化未测量混杂 (E-value)
-# ==============================================================================
-message("\n>>> [三_3] 计算 E-value 边界...")
-# 基于第二阶段 Model 3 中 Q4 的 OR=1.20 和下限 1.04 计算
-ev <- evalues.OR(est = 1.20, lo = 1.04, hi = 1.39, rare = FALSE)
-cat("\n======================================================\n")
-cat("🛡️ E-value 稳健性评估\n")
-cat("======================================================\n")
-print(ev)
-
-# ==============================================================================
-# 三_4：亚组分层分析 (Subgroup Analysis) - 动态防报错版
-# ==============================================================================
-message("\n>>> [三_4] 启动亚组交互作用分析 (动态过滤单一水平变量)...")
-
-run_subgroup <- function(sub_df, subgroup_name) {
-  # 乘以 10，观察每增加 0.1 个单位 Ratio 的影响，清理冗余 levels
-  sub_df <- sub_df %>% mutate(Ratio_Scale = Ratio_18_16 * 10) %>% droplevels()
-  
-  # 定义想要校正的候选混杂变量池
-  candidate_vars <- c("Age", "Gender", "BMI", "Smoking", "Energy_Kcal")
-  
-  # 核心防御机制：只保留在当前亚组中拥有 2 个或以上不同值的变量
-  valid_vars <- candidate_vars[sapply(candidate_vars, function(v) length(unique(sub_df[[v]])) > 1)]
-  
-  # 动态拼接公式
-  f_str <- paste("High_CRP_num ~ Ratio_Scale +", paste(valid_vars, collapse = " + "))
-  
-  fit <- glm(as.formula(f_str), data = sub_df, family = binomial())
-  res <- tidy(fit, exponentiate = TRUE, conf.int = TRUE) %>% filter(term == "Ratio_Scale")
-  
-  return(data.frame(
-    Subgroup = subgroup_name,
-    N = nrow(sub_df),
-    OR = round(res$estimate, 2),
-    Lower = round(res$conf.low, 2),
-    Upper = round(res$conf.high, 2),
-    P_Value = round(res$p.value, 4)
-  ))
-}
-
-# 逐个运行亚组
-res_male <- run_subgroup(df_stage_2 %>% filter(Gender == "Male"), "Male")
-res_female <- run_subgroup(df_stage_2 %>% filter(Gender == "Female"), "Female")
-res_bmi1 <- run_subgroup(df_stage_2 %>% filter(BMI < 25), "BMI < 25")
-res_bmi2 <- run_subgroup(df_stage_2 %>% filter(BMI >= 25 & BMI < 30), "BMI 25-30")
-res_bmi3 <- run_subgroup(df_stage_2 %>% filter(BMI >= 30), "BMI >= 30")
-res_age1 <- run_subgroup(df_stage_2 %>% filter(Age < 60), "Age < 60")
-res_age2 <- run_subgroup(df_stage_2 %>% filter(Age >= 60), "Age >= 60")
-
-# 整合结果并导出
-df_subgroup <- bind_rows(res_male, res_female, res_bmi1, res_bmi2, res_bmi3, res_age1, res_age2)
-write.csv(df_subgroup, "results_三/data/Stage_三_4_Subgroup_Analysis.csv", row.names = FALSE)
-
-cat("\n======================================================\n")
-cat("🌲 亚组分析底层数据 (每增加 0.1 ratio 单位的 OR)\n")
-cat("======================================================\n")
-print(df_subgroup)
-message(">>> 🎉 阶段三运算全部完成！")
-# ==============================================================================
-# 三_5：绘制高颜值亚组分析森林图 (Figure 2)
-# ==============================================================================
-message("\n>>> [三_5] 正在绘制出版级亚组分析森林图...")
-
-dir.create("results_三/plots", showWarnings = FALSE, recursive = TRUE)
-
-# 整理绘图数据结构，反转顺序使图形从上到下显示
-df_subgroup_plot <- df_subgroup %>%
+# 3. Track I: Observational association (energy-adjusted ratio) ---------------
+nhanes_clean <- nhanes_clean %>%
   mutate(
-    Subgroup = factor(Subgroup, levels = rev(Subgroup)),
-    Label = sprintf("%.2f (%.2f-%.2f)", OR, Lower, Upper) # 生成图上的文本标签
+    FA16_adj = resid(lm(DR1TS160 ~ Energy_Kcal, data = nhanes_clean,
+                        na.action = na.exclude)) + mean(DR1TS160, na.rm = TRUE),
+    FA18_adj = resid(lm(DR1TS180 ~ Energy_Kcal, data = nhanes_clean,
+                        na.action = na.exclude)) + mean(DR1TS180, na.rm = TRUE),
+    Ratio_adj = FA18_adj / (FA16_adj + 0.0001)
   )
 
-p_forest <- ggplot(df_subgroup_plot, aes(x = OR, y = Subgroup)) +
-  geom_vline(xintercept = 1, linetype = "dashed", color = "darkred", size = 0.8) +
-  geom_errorbarh(aes(xmin = Lower, xmax = Upper), height = 0.2, color = "#2E9FDF", size = 0.8) +
-  geom_point(shape = 15, size = 4, color = "#2E9FDF") +
-  # 在点旁边添加 OR (95% CI) 的文本
-  geom_text(aes(label = Label, x = Upper + 0.05), hjust = 0, size = 4) +
-  theme_classic(base_size = 14) +
-  labs(
-    title = "Subgroup Analysis of the 18:0/16:0 Ratio (Per 0.1 Unit Increase)",
-    x = "Odds Ratio (95% CI)",
-    y = ""
-  ) +
-  scale_x_continuous(limits = c(min(df_subgroup_plot$Lower) - 0.1, max(df_subgroup_plot$Upper) + 0.4)) +
-  theme(
-    plot.title = element_text(face = "bold", hjust = 0.5, size = 14),
-    axis.text.y = element_text(face = "bold", color = "black", size = 12),
-    axis.text.x = element_text(color = "black")
+ratio_adj_q <- quantile(nhanes_clean$Ratio_adj, probs = c(0,0.25,0.5,0.75,1), na.rm=TRUE)
+nhanes_clean$Ratio_adj_Q <- cut(
+  nhanes_clean$Ratio_adj, breaks = ratio_adj_q, include.lowest = TRUE,
+  labels = c("Q1","Q2","Q3","Q4")
+)
+
+dd <- datadist(nhanes_clean)
+options(datadist = "dd")
+
+# 3.1 RCS
+fit_rcs <- lrm(High_CRP_num ~ rcs(Ratio_adj, 4) + Age + Gender + Race + PIR +
+                BMI + Smoking + Alcohol_g + MET_imp + Energy_Kcal +
+                Total_Fat + Fiber + Diabetes + Hypertension,
+              data = nhanes_clean)
+print(anova(fit_rcs))
+
+# 3.2 Logistic regression
+fit_model3 <- glm(
+  High_CRP_num ~ Ratio_adj_Q + Age + Gender + Race + PIR + BMI +
+    Smoking + Alcohol_g + MET_imp + Energy_Kcal + Total_Fat + Fiber +
+    Diabetes + Hypertension,
+  data = nhanes_clean, family = binomial()
+)
+res_model3 <- tidy(fit_model3, exponentiate = TRUE, conf.int = TRUE) %>%
+  filter(grepl("Ratio_adj_Q", term))
+print(res_model3)
+
+nhanes_clean$Ratio_adj_Q_num <- as.numeric(nhanes_clean$Ratio_adj_Q)
+fit_trend <- glm(
+  High_CRP_num ~ Ratio_adj_Q_num + Age + Gender + Race + PIR + BMI +
+    Smoking + Alcohol_g + MET_imp + Energy_Kcal + Total_Fat + Fiber +
+    Diabetes + Hypertension,
+  data = nhanes_clean, family = binomial()
+)
+p_trend <- coef(summary(fit_trend))["Ratio_adj_Q_num", "Pr(>|z|)"]
+
+# 3.3 VIF
+fit_vif <- glm(
+  High_CRP_num ~ Ratio_adj_Q + FA16_adj + FA18_adj + Age + Gender + Race +
+    PIR + BMI + Smoking + Alcohol_g + MET_imp + Total_Fat + Fiber +
+    Diabetes + Hypertension,
+  data = nhanes_clean, family = binomial()
+)
+print(car::vif(fit_vif))
+
+# 3.4 PSM (Q4 vs Q1) with conditional logistic regression
+df_extreme <- nhanes_clean %>%
+  filter(Ratio_adj_Q %in% c("Q1","Q4")) %>%
+  mutate(
+    Exposure_Extreme = ifelse(Ratio_adj_Q == "Q4", 1, 0),
+    Exposure_Factor = factor(Exposure_Extreme, levels=c(0,1), labels=c("Q1","Q4"))
   )
 
-pdf("results_三/plots/Stage_三_5_Subgroup_Forest.pdf", width = 9, height = 6)
-print(p_forest)
-dev.off()
-message(">>> 🎉 亚组森林图 (Figure 2) 绘制成功！")
+psm_match <- matchit(Exposure_Extreme ~ Age + Gender + Race + PIR + BMI +
+                      Smoking + Alcohol_g + MET_imp + Energy_Kcal +
+                      Total_Fat + Fiber + Diabetes + Hypertension,
+                    data = df_extreme, method = "nearest", caliper = 0.05)
+matched_data <- match.data(psm_match)
 
-# 加载必要的包和修复后的数据
-library(tableone)
-df_fixed <- readRDS("results_一/data/Stage_一_2_Cleaned_Cohort.rds")
+fit_psm <- clogit(High_CRP_num ~ Exposure_Factor + strata(subclass),
+                 data = matched_data)
+summary(fit_psm)
 
-# 专门生成 Gender 在 Q1-Q4 中的分布 (包含人数和百分比)
-tab_gender <- CreateTableOne(vars = "Gender", strata = "Ratio_Quartile", data = df_fixed)
+# 3.5 Manual E‑value calculation
+calc_evalue <- function(or, lo) {
+  if (or <= 1) return(list(e_value = NA, e_value_lo = NA))
+  e_val <- or + sqrt(or * (or - 1))
+  e_val_lo <- ifelse(lo > 1, lo + sqrt(lo * (lo - 1)), 1)
+  list(e_value = e_val, e_value_lo = e_val_lo)
+}
+ev <- calc_evalue(1.20, 1.04)
+cat("E-value for point estimate:", round(ev$e_value, 3), "\n")
+cat("E-value for CI lower limit:", round(ev$e_value_lo, 3), "\n")
 
-cat("\n====================================\n")
-cat("📊 修复后的 Gender 分布数据 (供填入 Table 1)\n")
-cat("====================================\n")
-print(tab_gender, showAllLevels = TRUE)
+# 3.6 Subgroup analyses (per 0.1 unit increase)
+run_subgroup <- function(data, subgroup_name) {
+  data <- data %>% mutate(Ratio_Scale = Ratio_adj * 10) %>% droplevels()
+  covs <- c("Age","Gender","BMI","Smoking","Energy_Kcal")
+  covs <- covs[sapply(covs, function(v) length(unique(data[[v]])) > 1)]
+  f <- paste("High_CRP_num ~ Ratio_Scale +", paste(covs, collapse=" + "))
+  fit <- glm(f, data = data, family = binomial())
+  res <- tidy(fit, exponentiate = TRUE, conf.int = TRUE) %>% filter(term == "Ratio_Scale")
+  data.frame(Subgroup = subgroup_name, N = nrow(data),
+             OR = round(res$estimate,2), Lower = round(res$conf.low,2),
+             Upper = round(res$conf.high,2), P = round(res$p.value,4))
+}
+subgroups <- bind_rows(
+  run_subgroup(filter(nhanes_clean, Gender == "Male"), "Male"),
+  run_subgroup(filter(nhanes_clean, Gender == "Female"), "Female"),
+  run_subgroup(filter(nhanes_clean, BMI < 25), "BMI < 25"),
+  run_subgroup(filter(nhanes_clean, BMI >= 25 & BMI < 30), "BMI 25-30"),
+  run_subgroup(filter(nhanes_clean, BMI >= 30), "BMI >= 30"),
+  run_subgroup(filter(nhanes_clean, Age < 60), "Age < 60"),
+  run_subgroup(filter(nhanes_clean, Age >= 60), "Age >= 60")
+)
+write.csv(subgroups, "results/tables/Subgroup.csv", row.names = FALSE)
 
-# ==============================================================================
-# 项目名称：AB (三明治架构)
-# 当前阶段：四、机制揭秘 (脂肪酸 PCA 降维 & 宿主微环境中介分析) - 防冲突修复版
-# 工作目录：/Users/bing/AA/AB
-# ==============================================================================
+# 3.7 PCA on 9 fatty acids
+fa_vars <- c("DR1TS140","DR1TS160","DR1TS180","DR1TM181",
+             "DR1TP182","DR1TP183","DR1TP204","DR1TP205","DR1TP226")
+df_pca <- nhanes_clean %>% dplyr::select(SEQN, all_of(fa_vars), High_CRP_num) %>% drop_na()
+pca_res <- principal(df_pca[,fa_vars], nfactors=3, rotate="varimax", scores=TRUE)
+print(pca_res$loadings, cutoff=0.3)
 
-setwd("/Users/bing/AA/AB")
+df_pca <- cbind(df_pca, pca_res$scores) %>%
+  rename(Pattern_1 = RC1, Pattern_2 = RC2, Pattern_3 = RC3)
+pca_pvals <- sapply(1:3, function(i) {
+  f <- as.formula(paste0("High_CRP_num ~ Pattern_", i))
+  summary(glm(f, data=df_pca, family=binomial()))$coefficients[2,4]
+})
 
-if (!require("pacman")) install.packages("pacman")
-p_load(dplyr, tidyr, psych, factoextra, mediation, broom)
+# 3.8 Mediation analysis (TyG and SII)
+df_med <- nhanes_clean %>%
+  mutate(Ratio_Scale = Ratio_adj * 10) %>%
+  drop_na(TyG_Index, SII_Index)
+covars <- "Age + Gender + BMI + Smoking + Energy_Kcal + Diabetes"
 
-message(">>> [四_1] 加载全样本纯净基底数据...")
-df_stage_2 <- readRDS("results_一/data/Stage_一_2_Cleaned_Cohort.rds")
-
-# ==============================================================================
-# 四_1：脂肪酸平衡谱的 PCA 主成分分析
-# ==============================================================================
-message("\n>>> [四_1] 启动 PCA 降维，提取宏观膳食脂肪酸模式...")
-
-# 1. 提取阶段一埋线的 9 种代表性脂肪酸
-fa_vars <- c("DR1TS140", "DR1TS160", "DR1TS180", "DR1TM181", 
-             "DR1TP182", "DR1TP183", "DR1TP204", "DR1TP205", "DR1TP226")
-
-# ⚠️ 修复点：强制使用 dplyr::select 和 tidyr::drop_na 防止包冲突
-df_pca <- df_stage_2 %>%
-  dplyr::select(SEQN, all_of(fa_vars), High_CRP_num, Ratio_18_16) %>%
-  tidyr::drop_na()
-
-# 2. 执行 PCA (使用 psych 包的 varimax 正交旋转)
-pca_res <- principal(df_pca[, fa_vars], nfactors = 3, rotate = "varimax", scores = TRUE)
-
-cat("\n======================================================\n")
-cat("🧬 脂肪酸 PCA 模式提取 (载荷矩阵)\n")
-cat("======================================================\n")
-print(pca_res$loadings, cutoff = 0.3)
-
-# 3. 将 PCA 得分合并回原数据，探究其与炎症的关系
-df_pca_scores <- cbind(df_pca, pca_res$scores) %>%
-  dplyr::rename(Pattern_1 = RC1, Pattern_2 = RC2, Pattern_3 = RC3)
-
-fit_pca1 <- glm(High_CRP_num ~ Pattern_1, data = df_pca_scores, family = binomial())
-fit_pca2 <- glm(High_CRP_num ~ Pattern_2, data = df_pca_scores, family = binomial())
-fit_pca3 <- glm(High_CRP_num ~ Pattern_3, data = df_pca_scores, family = binomial())
-
-cat("\n======================================================\n")
-cat("📊 三大膳食模式与系统性炎症的关联 (单因素探索)\n")
-cat("======================================================\n")
-cat("Pattern_1 模式致炎 OR P值:", round(summary(fit_pca1)$coefficients[2, 4], 4), "\n")
-cat("Pattern_2 模式致炎 OR P值:", round(summary(fit_pca2)$coefficients[2, 4], 4), "\n")
-cat("Pattern_3 模式致炎 OR P值:", round(summary(fit_pca3)$coefficients[2, 4], 4), "\n")
-
-capture.output(print(pca_res$loadings), file = "results_四/data/Stage_四_1_PCA_Loadings.txt")
-
-# ==============================================================================
-# 四_2：中介分析 (TyG 与 SII 的桥梁作用)
-# ==============================================================================
-message("\n>>> [四_2] 启动中介分析引擎 (运算涉及 Bootstrap，请等待 1-3 分钟)...")
-
-df_med <- df_stage_2 %>%
-  dplyr::mutate(Ratio_Scale = Ratio_18_16 * 10) %>% 
-  tidyr::drop_na(TyG_Index, SII_Index)
-
-covariates <- "Age + Gender + BMI + Smoking + Energy_Kcal + Diabetes"
-
-# ---------------------------------------------------------
-# 路径 A：代谢路径 (TyG_Index) 中介效应
-# ---------------------------------------------------------
-message("   -> 正在计算 TyG 代谢中介路径...")
 set.seed(2026)
+med_tyg <- mediate(
+  lm(paste("TyG_Index ~ Ratio_Scale +", covars), data = df_med),
+  glm(paste("High_CRP_num ~ Ratio_Scale + TyG_Index +", covars),
+      data = df_med, family = binomial("probit")),
+  treat = "Ratio_Scale", mediator = "TyG_Index", boot = TRUE, sims = 500
+)
+summary(med_tyg)
 
-formula_m_tyg <- as.formula(paste("TyG_Index ~ Ratio_Scale +", covariates))
-fitM_TyG <- lm(formula_m_tyg, data = df_med)
-
-formula_y_tyg <- as.formula(paste("High_CRP_num ~ Ratio_Scale + TyG_Index +", covariates))
-fitY_TyG <- glm(formula_y_tyg, data = df_med, family = binomial("probit")) 
-
-med_out_tyg <- mediate(fitM_TyG, fitY_TyG, treat = "Ratio_Scale", mediator = "TyG_Index", 
-                       boot = TRUE, sims = 500)
-
-# ---------------------------------------------------------
-# 路径 B：免疫微环境路径 (SII_Index) 中介效应
-# ---------------------------------------------------------
-message("   -> 正在计算 SII 免疫中介路径...")
 set.seed(2026)
+med_sii <- mediate(
+  lm(paste("SII_Index ~ Ratio_Scale +", covars), data = df_med),
+  glm(paste("High_CRP_num ~ Ratio_Scale + SII_Index +", covars),
+      data = df_med, family = binomial("probit")),
+  treat = "Ratio_Scale", mediator = "SII_Index", boot = TRUE, sims = 500
+)
+summary(med_sii)
 
-formula_m_sii <- as.formula(paste("SII_Index ~ Ratio_Scale +", covariates))
-fitM_SII <- lm(formula_m_sii, data = df_med)
+# 3.9 Sensitivity analysis (excluding malignancy)
+mcq <- bind_rows(
+  nhanes('MCQ_I') %>% dplyr::select(SEQN, MCQ220),
+  nhanes('MCQ_J') %>% dplyr::select(SEQN, MCQ220)
+)
+df_sens <- nhanes_clean %>% left_join(mcq, by="SEQN") %>%
+  filter(is.na(MCQ220) | MCQ220 != 1)
+fit_sens <- glm(
+  High_CRP_num ~ Ratio_adj_Q + Age + Gender + Race + PIR + BMI +
+    Smoking + Alcohol_g + MET_imp + Energy_Kcal + Total_Fat + Fiber +
+    Diabetes + Hypertension,
+  data = df_sens, family = binomial()
+)
+tidy(fit_sens, exponentiate=TRUE, conf.int=TRUE) %>% filter(grepl("Ratio_adj_Q4", term))
 
-formula_y_sii <- as.formula(paste("High_CRP_num ~ Ratio_Scale + SII_Index +", covariates))
-fitY_SII <- glm(formula_y_sii, data = df_med, family = binomial("probit"))
+# 5. Track II: Model derivation and external validation -----------------------
 
-med_out_sii <- mediate(fitM_SII, fitY_SII, treat = "Ratio_Scale", mediator = "SII_Index", 
-                       boot = TRUE, sims = 500)
-
-# ---------------------------------------------------------
-# 输出并留痕中介结果
-# ---------------------------------------------------------
-cat("\n======================================================\n")
-cat("🧬 中介分析结果 1：TyG 代谢途径\n")
-cat("======================================================\n")
-print(summary(med_out_tyg))
-
-cat("\n======================================================\n")
-cat("🦠 中介分析结果 2：SII 免疫途径\n")
-cat("======================================================\n")
-print(summary(med_out_sii))
-
-sink("results_四/data/Stage_四_2_Mediation_Summary.txt")
-cat("--- TyG Mediation ---\n")
-print(summary(med_out_tyg))
-cat("\n--- SII Mediation ---\n")
-print(summary(med_out_sii))
-sink()
-
-message("\n>>> 🎉 阶段四全部跑完！机制网络构建成功。")
-
-
-# ==============================================================================
-# 四_3：导出中介分析原生效应图 (备用/参考)
-# ==============================================================================
-message("\n>>> [四_3] 正在导出中介效应点图...")
-
-dir.create("results_四/plots", showWarnings = FALSE, recursive = TRUE)
-
-pdf("results_四/plots/Stage_四_3_Mediation_Effects.pdf", width = 10, height = 5)
-par(mfrow = c(1, 2))
-plot(med_out_tyg, main = "Mediation via TyG Index", xlab = "Effect Size")
-plot(med_out_sii, main = "Mediation via SII Index", xlab = "Effect Size")
-dev.off()
-
-message(">>> 🎉 机制效应图导出完毕！")````
-
-# ==============================================================================
-# 项目名称：AB (基于三明治架构的双周期合并队列研究)
-# 当前阶段：五、数据绝对切割与临床预测模型重塑 (严格遵循 TRIPOD 规范)
-# 工作目录：/Users/bing/AA/AB
-# ==============================================================================
-
-setwd("/Users/bing/AA/AB")
-dir.create("results_五_新", showWarnings = FALSE)
-dir.create("results_五_新/data", showWarnings = FALSE)
-dir.create("results_五_新/plots", showWarnings = FALSE)
-
-if (!require("pacman")) install.packages("pacman")
-p_load(dplyr, tidyr, glmnet, rms, ggplot2, dcurves, caret)
-
-message(">>> [五_1] 加载全样本数据，并立即执行 70/30 绝对物理切割...")
-df_stage_2 <- readRDS("results_一/data/Stage_一_2_Cleaned_Cohort.rds")
-
-# 1. 提取全维特征池
-df_all <- df_stage_2 %>%
-  dplyr::select(Ratio_18_16, Age, Gender, Race, PIR, BMI, Smoking, Alcohol_g, 
-                MET_imp, Energy_Kcal, Total_Fat, Fiber, Diabetes, Hypertension, 
-                TyG_Index, SII_Index, High_CRP_num) %>%
-  tidyr::drop_na() %>%
+# 5.1 Unified predictor pool (variables common to NHANES and CHARLS)
+nhanes_model <- nhanes_clean %>%
+  dplyr::select(SEQN, Age, Gender, BMI, Smoking, TyG_Index, High_CRP_num) %>%
+  drop_na() %>%
   as.data.frame()
 
-# 2. 物理切割：70% 训练集，30% 测试集锁死备用
-set.seed(2026)
-train_index <- caret::createDataPartition(df_all$High_CRP_num, p = 0.7, list = FALSE)
+train_index <- createDataPartition(nhanes_model$High_CRP_num, p=0.7, list=FALSE)
+df_train <- nhanes_model[train_index, ]
+df_test  <- nhanes_model[-train_index, ]
 
-df_train <- df_all[train_index, ]
-df_test  <- df_all[-train_index, ]
+x_train <- model.matrix(High_CRP_num ~ . - SEQN, data = df_train)[, -1]
+y_train <- df_train$High_CRP_num
 
-# 将测试集原封不动锁入硬盘，供第六阶段使用
-saveRDS(df_test, "results_五_新/data/Stage_五_Locked_Test_Set.rds")
-message(glue::glue(">>> 切割完成！训练集 (70%): {nrow(df_train)} 人 | 盲测集已锁死 (30%): {nrow(df_test)} 人"))
+cv_lasso <- cv.glmnet(x_train, y_train, family="binomial", alpha=1, nfolds=10)
+lambda_1se <- cv_lasso$lambda.1se
+selected_vars_raw <- rownames(coef(cv_lasso, s=lambda_1se))[
+  which(coef(cv_lasso, s=lambda_1se)[,1] != 0)]
+selected_vars_raw <- setdiff(selected_vars_raw, "(Intercept)")
+message("LASSO selected raw: ", paste(selected_vars_raw, collapse=", "))
 
-# ==============================================================================
-# 五_2：在 70% 训练集中，启动 LASSO 降维
-# ==============================================================================
-message(">>> [五_2] 仅在训练集中启动 LASSO 机器学习引擎 (杜绝数据泄露)...")
+# ---- Map dummy names back to original factor names ----
+map_back <- function(vars) {
+  vars <- gsub("GenderFemale|GenderMale", "Gender", vars)
+  vars <- gsub("SmokingCurrent|SmokingFormer/Unknown|SmokingNever", "Smoking", vars)
+  unique(vars)
+}
+selected_vars <- map_back(selected_vars_raw)
+message("Final model variables: ", paste(selected_vars, collapse=", "))
 
-x_matrix <- model.matrix(High_CRP_num ~ ., data = df_train)[, -1]
-y_vector <- df_train$High_CRP_num
+formula_str <- paste("High_CRP_num ~", paste(selected_vars, collapse=" + "))
+fit_final <- glm(as.formula(formula_str), data = df_train, family = binomial())
+summary(fit_final)
 
-set.seed(2026)
-cv_lasso <- cv.glmnet(x_matrix, y_vector, family = "binomial", alpha = 1, nfolds = 10)
-best_lambda <- cv_lasso$lambda.1se
+df_test$pred <- predict(fit_final, newdata = df_test, type = "response")
+roc_internal <- roc(df_test$High_CRP_num, df_test$pred)
+c_index_internal <- auc(roc_internal)
 
-lasso_coefs <- coef(cv_lasso, s = best_lambda)
-selected_vars_idx <- which(lasso_coefs != 0)
-selected_vars_names <- rownames(lasso_coefs)[selected_vars_idx]
-selected_vars_names <- selected_vars_names[selected_vars_names != "(Intercept)"]
-
-cat("\n======================================================\n")
-cat("🎯 训练集 LASSO 筛选出的核心预测因子\n")
-cat("======================================================\n")
-print(selected_vars_names)
-
-pdf("results_五_新/plots/Stage_五_1_LASSO_Path.pdf", width = 10, height = 5)
-par(mfrow = c(1, 2))
-plot(cv_lasso$glmnet.fit, "lambda", label = TRUE)
-plot(cv_lasso)
+pdf("results/figures/Internal_Calibration.pdf")
+val.prob(df_test$pred, df_test$High_CRP_num)
 dev.off()
 
-# ==============================================================================
-# 五_3：在 70% 训练集中，重构终极 Nomogram 预测模型
-# ==============================================================================
-message("\n>>> [五_3] 基于训练集 LASSO 结果，重塑临床预测列线图...")
-
-raw_candidate_vars <- c("Ratio_18_16", "Age", "Gender", "Race", "PIR", "BMI", "Smoking", 
-                        "Alcohol_g", "MET_imp", "Energy_Kcal", "Total_Fat", "Fiber", 
-                        "Diabetes", "Hypertension", "TyG_Index", "SII_Index")
-
-final_model_vars <- raw_candidate_vars[sapply(raw_candidate_vars, function(v) any(grepl(v, selected_vars_names)))]
-cat("👉 最终纳入模型的特征为: ", paste(final_model_vars, collapse = ", "), "\n")
-
-dd_train <- datadist(df_train)
-options(datadist = "dd_train")
-
-nomo_formula <- as.formula(paste("High_CRP_num ~", paste(final_model_vars, collapse = " + ")))
-fit_nomo_final <- rms::lrm(nomo_formula, data = df_train, x = TRUE, y = TRUE)
-
-# 保存模型对象供第六阶段调用
-saveRDS(fit_nomo_final, "results_五_新/data/Stage_五_Final_Model.rds")
-
-nom <- rms::nomogram(fit_nomo_final, fun = plogis, fun.at = c(0.1, 0.3, 0.5, 0.7, 0.9), 
-                     funlabel = "Risk of High Systemic Inflammation", lp = FALSE)
-
-pdf("results_五_新/plots/Stage_五_2_Training_Nomogram.pdf", width = 12, height = 8)
-plot(nom, cex.var = 0.8, cex.axis = 0.8, lmgp = 0.2)
-title(main = "Nomogram for Predicting Inflammation (Training Cohort)", line = 1.5)
+dca_internal <- dca(High_CRP_num ~ pred, data = df_test,
+                    thresholds = seq(0,1,0.01),
+                    label = list(pred = "Model"))
+pdf("results/figures/Internal_DCA.pdf")
+plot(dca_internal)
 dev.off()
 
-# 训练集内部 Bootstrap 校准
-set.seed(2026)
-cal_train <- rms::calibrate(fit_nomo_final, method = "boot", B = 1000)
-pdf("results_五_新/plots/Stage_五_3_Training_Calibration.pdf", width = 7, height = 7)
-plot(cal_train, xlab = "Predicted Probability", ylab = "Actual Probability", main = "Training Calibration (B=1000)")
-dev.off()
-
-cat(glue::glue("\n🌟 训练集内部 C-index (AUC) 为: {round(fit_nomo_final$stats['C'], 3)}\n"))
-message(">>> 🎉 第五阶段 (模型生成) 完成！模型与测试集已封存。")
-
-# ==============================================================================
-# 项目名称：AB (基于三明治架构的双周期合并队列研究)
-# 当前阶段：六、严格独立盲测验证 (基于 30% 隔离测试集)
-# 工作目录：/Users/bing/AA/AB
-# ==============================================================================
-
-setwd("/Users/bing/AA/AB")
-dir.create("results_六_新", showWarnings = FALSE)
-
-if (!require("pacman")) install.packages("pacman")
-p_load(dplyr, rms, ggplot2, dcurves, Hmisc)
-
-message(">>> [六_1] 提取锁死的测试集与训练完成的模型...")
-
-# 读取第五阶段封存的数据与模型
-df_test <- readRDS("results_五_新/data/Stage_五_Locked_Test_Set.rds")
-fit_nomo_final <- readRDS("results_五_新/data/Stage_五_Final_Model.rds")
-
-# ==============================================================================
-# 六_2：执行实弹盲测与 C-index 计算
-# ==============================================================================
-message(">>> [六_2] 正在 30% 隔离测试集中进行实战预测盲测...")
-
-df_test$pred_prob <- predict(fit_nomo_final, newdata = df_test, type = "fitted")
-
-val_res <- Hmisc::rcorr.cens(df_test$pred_prob, df_test$High_CRP_num)
-c_index_test <- val_res["C Index"]
-
-cat("\n======================================================\n")
-cat(glue::glue("🌟 30% 隔离盲测集 C-index 为: {round(c_index_test, 3)}\n"))
-cat("======================================================\n")
-
-# ==============================================================================
-# 六_3：绘制测试集的终极图表 (Calibration & DCA)
-# ==============================================================================
-message(">>> [六_3] 导出隔离盲测集的最终性能图纸...")
-
-# 1. 绘制测试集校准曲线
-pdf("results_六_新/Stage_六_1_Testing_Calibration.pdf", width = 7, height = 7)
-rms::val.prob(df_test$pred_prob, df_test$High_CRP_num, 
-              xlab = "Nomogram Predicted Probability", 
-              ylab = "Actual Observed Fraction")
-title(main = "Testing Cohort Calibration Curve (30% Split)", line = 2.5)
-dev.off()
-
-# 2. 绘制测试集决策曲线 (DCA)
-dca_test <- dcurves::dca(High_CRP_num ~ pred_prob, 
-                         data = df_test,
-                         thresholds = seq(0, 1, by = 0.01),
-                         label = list(pred_prob = "Validated Nomogram Model"))
-
-pdf("results_六_新/Stage_六_2_Testing_DCA.pdf", width = 8, height = 6)
-p_test_dca <- plot(dca_test) +
-  labs(title = "Testing Cohort Decision Curve Analysis (30% Split)",
-       x = "Threshold Probability", y = "Net Benefit") +
-  theme_bw() +
-  theme(plot.title = element_text(face = "bold", hjust = 0.5))
-print(p_test_dca)
-dev.off()
-
-message(">>> 🎉 第六阶段 (独立盲测) 完美收官！临床预测工具性能定案。")
-
-# ==============================================================================
-# 项目名称：AB ( Revision 终极数据回应完整脚本)
-# 运行说明：请在重启 RStudio 后，直接全选运行此脚本
-# ==============================================================================
-
-# ------------------------------------------------------------------------------
-# 0. 环境初始化与数据加载
-# ------------------------------------------------------------------------------
-message(">>> [0/4] 正在初始化环境并加载数据...")
-
-if (!require("pacman")) install.packages("pacman")
-p_load(dplyr, rms, ResourceSelection, nhanesA, pROC, Hmisc, broom, car)
-
-setwd("/Users/bing/AA/AB")
-
-# 加载您的核心纯净数据底座和锁死的测试集
-df_stage_2 <- readRDS("results_一/data/Stage_一_2_Cleaned_Cohort.rds")
-df_test <- readRDS("results_五_新/data/Stage_五_Locked_Test_Set.rds")
-
-# ------------------------------------------------------------------------------
-# 模块一：营养学铁律——残差法能量校正与共线性陷阱(VIF)反击
-# ------------------------------------------------------------------------------
-message("\n>>> [1/4] 正在执行模块一：能量校正与独立效应验证...")
-
-# 1. 计算能量校正后的绝对摄入量 (残差法)
-fit_16 <- lm(DR1TS160 ~ Energy_Kcal, data = df_stage_2, na.action = na.exclude)
-df_stage_2$FA16_adj <- resid(fit_16) + mean(df_stage_2$DR1TS160, na.rm = TRUE)
-
-fit_18 <- lm(DR1TS180 ~ Energy_Kcal, data = df_stage_2, na.action = na.exclude)
-df_stage_2$FA18_adj <- resid(fit_18) + mean(df_stage_2$DR1TS180, na.rm = TRUE)
-
-# 2. 计算校正后的比值，并切分四分位数
-df_stage_2$Ratio_adj <- df_stage_2$FA18_adj / (df_stage_2$FA16_adj + 0.0001)
-ratio_adj_q <- quantile(df_stage_2$Ratio_adj, probs = c(0, 0.25, 0.5, 0.75, 1), na.rm = TRUE)
-df_stage_2$Ratio_adj_Quartile <- cut(df_stage_2$Ratio_adj, breaks = ratio_adj_q, include.lowest = TRUE, labels = c("Q1", "Q2", "Q3", "Q4"))
-
-# 3. 陷阱验证：同时放入比值与绝对值，计算方差膨胀因子(VIF)
-trap_formula <- "High_CRP_num ~ Ratio_adj_Quartile + FA16_adj + FA18_adj + Age + Gender + Race + PIR + BMI + Smoking + Alcohol_g + MET_imp + Total_Fat + Fiber + Diabetes + Hypertension"
-fit_trap <- glm(as.formula(trap_formula), data = df_stage_2, family = binomial())
-
-cat("\n======================================================\n")
-cat("🛡️ [1A] 审稿人共线性陷阱验证 (查看 VIF 值，若 >5 则证明审稿人逻辑有误)\n")
-cat("======================================================\n")
-print(car::vif(fit_trap))
-
-# 4. 正确的独立效应：仅使用能量校正后的比值
-correct_formula <- "High_CRP_num ~ Ratio_adj_Quartile + Age + Gender + Race + PIR + BMI + Smoking + Alcohol_g + MET_imp + Total_Fat + Fiber + Diabetes + Hypertension"
-fit_correct <- glm(as.formula(correct_formula), data = df_stage_2, family = binomial())
-res_correct <- broom::tidy(fit_correct, exponentiate = TRUE, conf.int = TRUE) %>% 
-  filter(grepl("Ratio_adj_QuartileQ4", term))
-
-cat("\n======================================================\n")
-cat("🛡️ [1B] 能量校正后的独立致炎效应 (写进文章的核心 OR 值)\n")
-cat("======================================================\n")
-print(as.data.frame(res_correct)[, c("term", "estimate", "conf.low", "conf.high", "p.value")])
-
-
-# ------------------------------------------------------------------------------
-# 模块二：临床转化的硬核逻辑——模型的增量价值分析 (NRI / IDI)
-# ------------------------------------------------------------------------------
-message("\n>>> [2/4] 正在执行模块二：模型预测增量价值分析...")
-
-# 模型 A (基准 4 变量) 与 模型 B (加上膳食比值)
-fit_A <- glm(High_CRP_num ~ Gender + BMI + TyG_Index + SII_Index, family = binomial(), data = df_test)
-fit_B <- glm(High_CRP_num ~ Gender + BMI + TyG_Index + SII_Index + Ratio_18_16, family = binomial(), data = df_test)
-
-prob_A <- predict(fit_A, type = "response")
-prob_B <- predict(fit_B, type = "response")
-
-cat("\n======================================================\n")
-cat("📊 [2A] DeLong's Test: AUC 差异 (期待 P > 0.05)\n")
-cat("======================================================\n")
-roc_A <- roc(df_test$High_CRP_num, prob_A, quiet = TRUE)
-roc_B <- roc(df_test$High_CRP_num, prob_B, quiet = TRUE)
-print(roc.test(roc_A, roc_B))
-
-cat("\n======================================================\n")
-cat("📊 [2B] NRI 与 IDI 综合重分类评估 (期待 P > 0.05)\n")
-cat("======================================================\n")
-idi_nri_result <- Hmisc::improveProb(x1 = prob_A, x2 = prob_B, y = df_test$High_CRP_num)
-print(idi_nri_result)
-
-
-# ------------------------------------------------------------------------------
-# 模块三：TRIPOD 规范——Hosmer-Lemeshow 拟合优度检验 (终极防崩溃版)
-# ------------------------------------------------------------------------------
-message("\n>>> [3/4] 正在执行模块三：Hosmer-Lemeshow 检验 (启动自动降阶与清洗)...")
-
-# 1. 提取向量并硬性清洗 NA
-hl_y_raw <- as.numeric(as.character(df_test$High_CRP_num))
-hl_prob_raw <- as.numeric(df_test$pred_prob)
-valid_idx <- !is.na(hl_y_raw) & !is.na(hl_prob_raw)
-hl_y <- hl_y_raw[valid_idx]
-hl_prob <- hl_prob_raw[valid_idx]
-
-# 2. 注入极微小白噪声，强行打破绝对重叠 (1e-9量级，不影响真实统计)
-set.seed(2026)
-hl_prob_noise <- hl_prob + runif(length(hl_prob), min = 0, max = 1e-9)
-
-# 3. 自动降阶防撞车寻优机制
-run_hl_bulletproof <- function(y, prob) {
-  for (g_val in 10:5) {
-    res <- tryCatch({
-      ResourceSelection::hoslem.test(y, prob, g = g_val)
-    }, error = function(e) NULL)
-    
-    if (!is.null(res)) {
-      cat(glue::glue("✅ 成功！当前采用无重叠的最优分箱 g = {g_val}。\n"))
-      return(res)
-    }
-  }
-  return("警告：数据极度集中，HL 检验彻底不收敛。请直接在文中报告 Brier Score。")
+# Incremental value of SII
+df_test_sii <- df_test %>%
+  inner_join(nhanes_clean %>% dplyr::select(SEQN, SII_Index), by = "SEQN")
+if (nrow(df_test_sii) > 0) {
+  formula_sii_str <- paste("High_CRP_num ~", paste(selected_vars, collapse=" + "), "+ SII_Index")
+  fit_with_sii <- glm(as.formula(formula_sii_str), data = df_test_sii, family = binomial())
+  roc_with <- roc(df_test_sii$High_CRP_num, predict(fit_with_sii, type="response"))
+  delong_p <- roc.test(roc_internal, roc_with)$p.value
+  message("DeLong P (SII increment): ", delong_p)
 }
 
-cat("\n======================================================\n")
-cat("📏 [3] Hosmer-Lemeshow 检验最终结果\n")
-cat("======================================================\n")
-hl_test_final <- run_hl_bulletproof(hl_y, hl_prob_noise)
-if(is.list(hl_test_final)) print(hl_test_final) else cat(hl_test_final, "\n")
+# 6. CHARLS external validation -----------------------------------------------
+charls_harmonized <- read_dta("/Users/bing/CHARLS/Harmonized/H_CHARLS_D_Data.dta") %>%
+  dplyr::select(ID, ragender, r4agey)
+blood_data <- read_dta("/Users/bing/CHARLS/2015/Blood.dta") %>%
+  dplyr::select(ID, bl_tg, bl_glu, bl_crp)
+biomarker_data <- read_dta("/Users/bing/CHARLS/2015/Biomarker.dta") %>%
+  dplyr::select(ID, qi002, ql002)
+
+charls_clean <- charls_harmonized %>%
+  left_join(blood_data, by = "ID") %>%
+  left_join(biomarker_data, by = "ID") %>%
+  filter(!is.na(ragender), !is.na(bl_tg), !is.na(bl_glu),
+         !is.na(qi002), !is.na(ql002), !is.na(bl_crp),
+         !is.na(r4agey)) %>%
+  filter(qi002 > 50, ql002 > 10, bl_crp <= 10) %>%
+  mutate(
+    Gender = ifelse(ragender == 1, "Male", "Female"),
+    Age = r4agey,
+    BMI = ql002 / ((qi002/100)^2),
+    TyG_Index = log(bl_tg * bl_glu / 2),
+    High_CRP_num = ifelse(bl_crp > 3, 1, 0)
+  ) %>%
+  dplyr::select(ID, Gender, Age, BMI, TyG_Index, High_CRP_num)
+
+charls_clean$Gender <- factor(charls_clean$Gender, levels = c("Male","Female"))
+
+# Safety net for missing variables
+missing_vars <- setdiff(selected_vars, colnames(charls_clean))
+if (length(missing_vars) > 0) {
+  message("WARNING: CHARLS lacks: ", paste(missing_vars, collapse=", "))
+  message("Refitting model without these variables.")
+  available_vars <- intersect(selected_vars, colnames(charls_clean))
+  if (length(available_vars) < 2) {
+    stop("Too few predictors available in CHARLS for valid external validation.")
+  }
+  formula_str <- paste("High_CRP_num ~", paste(available_vars, collapse=" + "))
+  fit_final <- glm(as.formula(formula_str), data = df_train, family = binomial())
+  message("Refitted model with: ", paste(available_vars, collapse=", "))
+  selected_vars <- available_vars
+}
+
+charls_clean$pred <- predict(fit_final, newdata = charls_clean, type = "response")
+
+roc_ext <- roc(charls_clean$High_CRP_num, charls_clean$pred)
+c_index_ext <- auc(roc_ext)
+message("External C-index (CHARLS): ", round(c_index_ext, 3))
+
+pdf("results/figures/External_Calibration.pdf")
+val.prob(charls_clean$pred, charls_clean$High_CRP_num)
+dev.off()
+
+dca_ext <- dca(High_CRP_num ~ pred, data = charls_clean,
+               thresholds = seq(0,1,0.01),
+               label = list(pred = "Model"))
+pdf("results/figures/External_DCA.pdf")
+plot(dca_ext)
+dev.off()
+
+# 7. Save results ------------------------------------------------------------
+saveRDS(list(
+  fit_final = fit_final,
+  selected_vars = selected_vars,
+  c_internal = c_index_internal,
+  c_external = c_index_ext,
+  subgroups = subgroups,
+  pca_pvals = pca_pvals,
+  trend_p = p_trend
+), "data/final_results.rds")
+
+message("All analyses completed successfully.")
 
 
-# ------------------------------------------------------------------------------
-# 模块四：反向因果——剔除恶性肿瘤患者的敏感性分析
-# ------------------------------------------------------------------------------
-message("\n>>> [4/4] 正在执行模块四：排除恶性肿瘤病史的反向因果敏感性分析...")
+# ==============================================================================
+# Project Data Overview – Print all key results for manuscript preparation
+# Run after the main pipeline has completed successfully.
+# ==============================================================================
 
-# 联网拉取肿瘤调查问卷，并做安全合并
-mcq_I <- nhanes('MCQ_I') %>% dplyr::select(SEQN, MCQ220)
-mcq_J <- nhanes('MCQ_J') %>% dplyr::select(SEQN, MCQ220)
-mcq_merge <- bind_rows(mcq_I, mcq_J)
+# Load saved results
+res <- readRDS("data/final_results.rds")
+attach(res, warn.conflicts = FALSE)
 
-df_sens <- df_stage_2 %>% 
-  left_join(mcq_merge, by = "SEQN") %>%
-  filter(is.na(MCQ220) | MCQ220 != 1)
+cat("\n")
+cat("================================================================================\n")
+cat("                    PROJECT DATA OVERVIEW\n")
+cat("================================================================================\n\n")
 
-# 重跑模型
-model3_sens_formula <- "High_CRP_num ~ Ratio_Quartile + Age + Gender + Race + PIR + BMI + Smoking + Alcohol_g + MET_imp + Energy_Kcal + Total_Fat + Fiber + Diabetes + Hypertension"
-fit_sens <- glm(as.formula(model3_sens_formula), data = df_sens, family = binomial())
-res_sens <- broom::tidy(fit_sens, exponentiate = TRUE, conf.int = TRUE) %>% 
-  filter(grepl("Ratio_QuartileQ4", term))
+# 1. Cohort sizes -------------------------------------------------------------
+cat("--- 1. COHORT SIZES ---\n")
+cat(sprintf("NHANES full cohort (Track I)           : %d\n", nrow(readRDS("data/nhanes_clean.rds"))))
+cat(sprintf("CHARLS external validation cohort      : %d\n", nrow(readRDS("data/final_results.rds")$selected_vars) )) # 修正：用实际数据
+cat("\n")
 
-cat("\n======================================================\n")
-cat("⚔️ [4] 排除肿瘤病史后的敏感性 OR 值\n")
-cat("======================================================\n")
-cat(glue::glue("过滤后最终纳入的敏感性队列总人数: {nrow(df_sens)}\n\n"))
-print(as.data.frame(res_sens)[, c("term", "estimate", "conf.low", "conf.high", "p.value")])
+# 修正：直接从拟合对象和环境获取样本量
+cat(sprintf("Training set (Track II)                : %d\n", length(fit_final$y)))
+cat(sprintf("Internal test set                      : %d\n", length(fit_final$fitted.values) - length(fit_final$y))) # 近似
+cat("\n")
 
-message("\n>>> 🎉 全部四大战役数据运算彻底完毕！可以整理出组了。")
+# 更好的方法：重新读取nhanes_model
+nhanes_model <- readRDS("data/nhanes_clean.rds") %>%
+  dplyr::select(SEQN, Age, Gender, BMI, Smoking, TyG_Index, High_CRP_num) %>%
+  drop_na()
+train_idx <- caret::createDataPartition(nhanes_model$High_CRP_num, p = 0.7, list = FALSE)
+cat(sprintf("Training set (Track II)                : %d\n", nrow(nhanes_model[train_idx, ])))
+cat(sprintf("Internal test set                      : %d\n", nrow(nhanes_model[-train_idx, ])))
+cat(sprintf("CHARLS external validation cohort      : %d\n", nrow(readRDS("data/final_results.rds")$selected_vars) )) # 不适用，改用外部验证时保存的charls_clean
+# 实际上charls_clean没有单独保存，我们后面单独处理
+cat("\n")
+
+# 2. Track I core association -------------------------------------------------
+cat("--- 2. TRACK I: OBSERVATIONAL ASSOCIATION ---\n")
+cat(sprintf("RCS nonlinear P-value                  : 0.7971\n"))
+cat(sprintf("Linear trend P-value                   : %.4f\n", trend_p))
+cat("Multivariable-adjusted (Model 3):\n")
+cat("  Q4 vs Q1 OR = 1.20 (95% CI: 1.04-1.40), P = 0.013\n")
+cat("\n")
+
+# 3. PSM and E-value ----------------------------------------------------------
+cat("--- 3. PSM AND E-VALUE ---\n")
+cat("PSM matched pseudo-population          : 4,192 participants (2,096 per group)\n")
+cat("PSM OR (Q4 vs Q1)                      : 1.176 (95% CI: 1.006-1.375), P = 0.0423\n")
+cat(sprintf("E-value for point estimate             : 1.418\n"))
+cat(sprintf("E-value for CI lower limit             : 1.082\n"))  # 近似
+cat("\n")
+
+# 4. Sensitivity analyses -----------------------------------------------------
+cat("--- 4. SENSITIVITY ANALYSES (Q4 vs Q1) ---\n")
+cat("Excluding malignancy   : OR = 1.20 (1.04-1.39), P = 0.015\n")
+cat("Excluding diabetes     : OR = 1.18 (1.00-1.38), P = 0.046\n")
+cat("Excluding hypertension : OR = 1.23 (1.02-1.49), P = 0.033\n")
+cat("Stricter hs-CRP >5 mg/L: OR = 1.26 (1.05-1.52), P = 0.015\n")
+cat("\n")
+
+# 5. PCA ----------------------------------------------------------------------
+cat("--- 5. PCA OF DIETARY FATTY ACIDS ---\n")
+cat(sprintf("Principal components extracted         : 3 (eigenvalues > 1)\n"))
+cat(sprintf("Cumulative variance explained          : 63.72%%\n"))
+cat(sprintf("RC1 (long-chain SFA pattern) variance  : 34.86%%\n"))
+cat(sprintf("RC1 association with SCI P-value       : %.4f\n", pca_pvals[1]))
+cat(sprintf("RC2 P-value                            : %.4f\n", pca_pvals[2]))
+cat(sprintf("RC3 P-value                            : %.4f\n", pca_pvals[3]))
+cat("\n")
+
+# 6. Mediation analysis -------------------------------------------------------
+cat("--- 6. MEDIATION ANALYSIS ---\n")
+cat("Average Direct Effect (ADE)            : 0.015 (95% CI: 0.002-0.028), P = 0.016\n")
+cat("TyG indirect pathway (ACME)            : -0.0003 (95% CI: -0.0015 to 0.0013), P = 0.736\n")
+cat("SII indirect pathway (ACME)            : 0.0011 (95% CI: -0.0001 to 0.0022)\n")
+cat("  Proportion mediated                  : ~7.2%, P = 0.080 (marginal)\n")
+cat("\n")
+
+# 7. Track II model -----------------------------------------------------------
+cat("--- 7. TRACK II: PREDICTION MODEL ---\n")
+cat(sprintf("LASSO selected predictors              : %s\n", paste(selected_vars, collapse = ", ")))
+cat(sprintf("Internal validation C-index            : %.3f\n", c_internal))
+cat(sprintf("External validation C-index (CHARLS)   : %.3f\n", c_external))
+cat("Calibration and DCA plots saved in     : results/figures/\n")
+cat("\n")
+
+# 8. Incremental value of SII ------------------------------------------------
+cat("--- 8. INCREMENTAL VALUE OF SII ---\n")
+cat("DeLong test (adding SII to model) P-value: (see console output above)\n")
+cat("NRI and IDI P-values not directly stored, please refer to original output.\n")
+cat("\n")
+
+# 9. Subgroup results (example) -----------------------------------------------
+cat("--- 9. SUBGROUP ANALYSES (PER 0.1-UNIT INCREASE) ---\n")
+print(subgroups, row.names = FALSE)
+cat("\n")
+
+cat("================================================================================\n")
+cat("                   END OF DATA OVERVIEW\n")
+cat("================================================================================\n")
+detach(res)
+
+
+# ==============================================================================
+# Final publication-quality figures 
+# All calibrations redrawn with ggplot2 to avoid val.prob argument errors
+# ==============================================================================
+
+library(dplyr)
+library(ggplot2)
+library(rms)         # only for nomogram
+library(glmnet)
+library(pROC)
+library(dcurves)
+library(splines)
+
+# ---------- Publication style ----------
+pal_blue   <- "#0072B2"
+pal_orange <- "#D55E00"
+pal_grey   <- "#666666"
+
+theme_nature <- theme_classic(base_size = 12) +
+  theme(
+    plot.title   = element_text(face = "bold", size = 14, hjust = 0.5),
+    axis.title   = element_text(face = "bold"),
+    axis.text    = element_text(color = "black"),
+    legend.position = "none",
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_line(linewidth = 0.3, color = "#E0E0E0")
+  )
+
+dir.create("results/figures", showWarnings = FALSE, recursive = TRUE)
+
+
+
+
+
+# ==============================================================================
+# 最终出版级图表（修正 RCS Y 轴为 OR，使用 glm + ns 并设定参考点）
+# ==============================================================================
+
+library(dplyr)
+library(ggplot2)
+library(splines)
+library(rms)         # 用于 nomogram
+library(glmnet)
+library(pROC)
+library(dcurves)
+
+# ---------- 统一配色与主题 ----------
+pal_blue   <- "#0072B2"
+pal_orange <- "#D55E00"
+pal_grey   <- "#666666"
+
+theme_nature <- theme_classic(base_size = 12) +
+  theme(
+    plot.title   = element_text(face = "bold", size = 14, hjust = 0.5),
+    axis.title   = element_text(face = "bold"),
+    axis.text    = element_text(color = "black"),
+    legend.position = "none",
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_line(linewidth = 0.3, color = "#E0E0E0")
+  )
+
+dir.create("results/figures", showWarnings = FALSE, recursive = TRUE)
+
+# ============================
+# Figure 1: RCS dose-response (OR scale, correct reference)
+# ============================
+message("1/8 RCS curve (OR scale)")
+
+# 使用 glm + ns 拟合
+fit_rcs_glm <- glm(High_CRP_num ~ ns(Ratio_adj, df = 4) + Age + Gender + Race + PIR +
+                     BMI + Smoking + Alcohol_g + MET_imp + Energy_Kcal +
+                     Total_Fat + Fiber + Diabetes + Hypertension,
+                   data = nhanes_clean, family = binomial)
+
+# 构建预测网格（使用 5%-95% 分位数范围）
+x_range <- quantile(nhanes_clean$Ratio_adj, probs = c(0.05, 0.95), na.rm = TRUE)
+newdata <- data.frame(Ratio_adj = seq(x_range[1], x_range[2], length.out = 100))
+
+# 固定协变量为中位数/众数
+newdata$Age <- median(nhanes_clean$Age, na.rm = TRUE)
+newdata$Gender <- factor("Male", levels = levels(nhanes_clean$Gender))
+newdata$Race <- factor(levels(nhanes_clean$Race)[1], levels = levels(nhanes_clean$Race))
+newdata$PIR <- median(nhanes_clean$PIR, na.rm = TRUE)
+newdata$BMI <- median(nhanes_clean$BMI, na.rm = TRUE)
+newdata$Smoking <- factor("Never", levels = levels(nhanes_clean$Smoking))
+newdata$Alcohol_g <- median(nhanes_clean$Alcohol_g, na.rm = TRUE)
+newdata$MET_imp <- median(nhanes_clean$MET_imp, na.rm = TRUE)
+newdata$Energy_Kcal <- median(nhanes_clean$Energy_Kcal, na.rm = TRUE)
+newdata$Total_Fat <- median(nhanes_clean$Total_Fat, na.rm = TRUE)
+newdata$Fiber <- median(nhanes_clean$Fiber, na.rm = TRUE)
+newdata$Diabetes <- factor("No", levels = levels(nhanes_clean$Diabetes))
+newdata$Hypertension <- factor("No", levels = levels(nhanes_clean$Hypertension))
+
+# 预测 log-odds
+pred_link <- predict(fit_rcs_glm, newdata, se.fit = TRUE, type = "link")
+
+# 以中位数为参考点，计算 OR
+ref_idx <- which.min(abs(newdata$Ratio_adj - median(nhanes_clean$Ratio_adj, na.rm = TRUE)))
+logor <- pred_link$fit - pred_link$fit[ref_idx]
+se_logor <- pred_link$se.fit
+newdata$OR <- exp(logor)
+newdata$lower <- exp(logor - 1.96 * se_logor)
+newdata$upper <- exp(logor + 1.96 * se_logor)
+
+# 绘制
+p_rcs <- ggplot(newdata, aes(x = Ratio_adj)) +
+  geom_hline(yintercept = 1, linetype = "dashed", color = pal_grey, linewidth = 0.7) +
+  geom_ribbon(aes(ymin = lower, ymax = upper), fill = pal_blue, alpha = 0.15) +
+  geom_line(aes(y = OR), color = pal_blue, linewidth = 1.2) +
+  annotate("text", x = max(newdata$Ratio_adj) * 0.7,
+           y = max(newdata$upper) * 0.8,
+           label = expression(italic(P)[non-linear] == 0.153),
+           size = 5, color = "black") +
+  labs(x = "Dietary 18:0/16:0 ratio (energy-adjusted)",
+       y = "Odds Ratio (95% CI)") +
+  theme_nature
+
+ggsave("results/figures/Stage_2_3_RCS_Curve.pdf", p_rcs, width = 8, height = 6)
+
+# ============================
+# Figure 2: Subgroup forest plot
+# ============================
+message("2/8 Subgroup forest plot")
+
+df_plot <- subgroups %>%
+  mutate(Subgroup = factor(Subgroup, levels = rev(unique(Subgroup))),
+         Label = sprintf("%.2f (%.2f–%.2f)", OR, Lower, Upper))
+
+p_forest <- ggplot(df_plot, aes(x = OR, y = Subgroup)) +
+  geom_vline(xintercept = 1, linetype = "dashed", color = pal_grey, linewidth = 0.8) +
+  geom_errorbarh(aes(xmin = Lower, xmax = Upper), height = 0.25,
+                 color = pal_blue, linewidth = 0.9) +
+  geom_point(shape = 18, size = 4.5, color = pal_blue) +
+  geom_text(aes(label = Label, x = Upper + 0.08), hjust = 0, size = 4.2, color = "black") +
+  scale_x_continuous(limits = c(min(df_plot$Lower) - 0.2, max(df_plot$Upper) + 0.6)) +
+  labs(x = "Odds Ratio (95% CI) per 0.1‑unit increase", y = "") +
+  theme_nature +
+  theme(axis.text.y = element_text(face = "bold", size = 11))
+
+ggsave("results/figures/Stage_3_5_Subgroup_Forest.pdf", p_forest, width = 10, height = 7)
+
+# ============================
+# Figure 3: LASSO path + CV
+# ============================
+message("3/8 LASSO path")
+
+pdf("results/figures/Stage_5_1_LASSO_Path.pdf", width = 11, height = 5.5)
+par(mfrow = c(1, 2), mar = c(4.5, 4.5, 3, 1))
+plot(cv_lasso$glmnet.fit, "lambda", label = TRUE,
+     col = c(pal_grey, pal_blue, pal_orange),
+     xlab = expression(Log~lambda), ylab = "Coefficients",
+     main = "LASSO coefficient paths")
+plot(cv_lasso, col = pal_blue, main = "10‑fold cross‑validation",
+     xlab = expression(Log~lambda), ylab = "Binomial Deviance")
+dev.off()
+
+# ============================
+# Figure 4: Nomogram
+# ============================
+message("4/8 Nomogram")
+
+formula_nom <- as.formula(paste("High_CRP_num ~", paste(selected_vars, collapse = " + ")))
+dd_train <- datadist(df_train)
+options(datadist = "dd_train")
+fit_nom <- lrm(formula_nom, data = df_train, x = TRUE, y = TRUE)
+
+nom <- nomogram(fit_nom, fun = plogis, fun.at = c(0.1, 0.3, 0.5, 0.7, 0.9),
+                funlabel = "Risk of high systemic inflammation", lp = FALSE)
+
+pdf("results/figures/Stage_5_2_Training_Nomogram.pdf", width = 12, height = 8)
+plot(nom, cex.var = 0.85, cex.axis = 0.85, lmgp = 0.2,
+     col.grid = c(pal_grey, pal_grey))
+title(main = "Nomogram for predicting inflammation (training cohort)", line = 1.5)
+dev.off()
+
+# ---------- Helper for calibration plots ----------
+plot_calibration <- function(prob, outcome, title_text, color_line) {
+  data <- data.frame(prob = prob, outcome = outcome)
+  data <- data %>% mutate(bin = cut(prob, breaks = seq(0, 1, by = 0.1), include.lowest = TRUE))
+  cal_data <- data %>%
+    group_by(bin) %>%
+    summarise(
+      mean_pred = mean(prob, na.rm = TRUE),
+      obs_rate  = mean(outcome, na.rm = TRUE),
+      count     = n()
+    ) %>%
+    ungroup() %>%
+    filter(!is.na(bin))
+  
+  ggplot(cal_data, aes(x = mean_pred, y = obs_rate)) +
+    geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = pal_grey, linewidth = 0.8) +
+    geom_point(color = color_line, size = 3) +
+    geom_line(color = color_line, linewidth = 1) +
+    labs(x = "Predicted probability", y = "Observed proportion",
+         title = title_text) +
+    theme_nature +
+    theme(plot.title = element_text(size = 12, face = "bold"))
+}
+
+# ============================
+# Figures 5–8: Calibration & DCA
+# ============================
+message("5/8 Internal calibration")
+p_cal_int <- plot_calibration(df_test$pred, df_test$High_CRP_num,
+                              "NHANES internal calibration", pal_blue)
+ggsave("results/figures/Internal_Calibration.pdf", p_cal_int, width = 7, height = 6)
+
+message("6/8 Internal DCA")
+dca_int <- dca(High_CRP_num ~ pred, data = df_test,
+               thresholds = seq(0, 1, 0.01),
+               label = list(pred = "3‑variable model")) |> plot() +
+  labs(title = "NHANES internal DCA") + theme_nature
+ggsave("results/figures/Internal_DCA.pdf", dca_int, width = 7, height = 6)
+
+message("7/8 External calibration")
+p_cal_ext <- plot_calibration(charls_clean$pred, charls_clean$High_CRP_num,
+                              "CHARLS external calibration", pal_orange)
+ggsave("results/figures/External_Calibration.pdf", p_cal_ext, width = 7, height = 6)
+
+message("8/8 External DCA")
+dca_ext <- dca(High_CRP_num ~ pred, data = charls_clean,
+               thresholds = seq(0, 1, 0.01),
+               label = list(pred = "3‑variable model")) |> plot() +
+  labs(title = "CHARLS external DCA") + theme_nature
+ggsave("results/figures/External_DCA.pdf", dca_ext, width = 7, height = 6)
+
+message("All figures saved in results/figures/")
+
+
+
+# ==============================================================================
+# 敏感性分析代码（回应审稿人关于过度调整偏倚和总SFA独立性的质疑）
+# 运行前提：已运行主分析脚本，环境中存在 nhanes_clean
+# ==============================================================================
+
+library(dplyr)
+library(broom)
+
+# ---- 准备数据：计算能量校正后的总SFA ----
+nhanes_clean <- nhanes_clean %>%
+  mutate(
+    Total_SFA_adj = resid(lm(DR1TSFAT ~ Energy_Kcal, data = nhanes_clean, 
+                             na.action = na.exclude)) + mean(DR1TSFAT, na.rm = TRUE),
+    Ratio_adj_Q_num = as.numeric(Ratio_adj_Q)
+  )
+
+# ============================================================
+# 敏感性分析 1：不调整 BMI、糖尿病、高血压（排除过度调整偏倚）
+# ============================================================
+message(">>> 敏感性分析 1：不调整 BMI/糖尿病/高血压")
+
+fit_sens1 <- glm(
+  High_CRP_num ~ Ratio_adj_Q + Age + Gender + Race + PIR +
+    Smoking + Alcohol_g + MET_imp + Energy_Kcal + Total_Fat + Fiber,
+  data = nhanes_clean, family = binomial()
+)
+
+res_sens1 <- tidy(fit_sens1, exponentiate = TRUE, conf.int = TRUE) %>%
+  filter(term == "Ratio_adj_QQ4")
+
+# 趋势检验
+fit_trend_sens1 <- glm(
+  High_CRP_num ~ Ratio_adj_Q_num + Age + Gender + Race + PIR +
+    Smoking + Alcohol_g + MET_imp + Energy_Kcal + Total_Fat + Fiber,
+  data = nhanes_clean, family = binomial()
+)
+p_trend_sens1 <- coef(summary(fit_trend_sens1))["Ratio_adj_Q_num", "Pr(>|z|)"]
+
+cat("\n敏感性分析 1 结果（不调整 BMI/糖尿病/高血压）:\n")
+cat(sprintf("  Q4 vs Q1 OR = %.2f (95%% CI: %.2f-%.2f), P = %.4f\n",
+            res_sens1$estimate, res_sens1$conf.low, res_sens1$conf.high, res_sens1$p.value))
+cat(sprintf("  趋势 P 值 = %.4f\n", p_trend_sens1))
+
+# ============================================================
+# 敏感性分析 2：额外调整总饱和脂肪（检验比值效应的独立性）
+# ============================================================
+message("\n>>> 敏感性分析 2：额外调整总 SFA")
+
+fit_sens2_full <- glm(
+  High_CRP_num ~ Ratio_adj_Q + Total_SFA_adj + Age + Gender + Race + PIR + 
+    BMI + Smoking + Alcohol_g + MET_imp + Energy_Kcal + Total_Fat + Fiber + 
+    Diabetes + Hypertension,
+  data = nhanes_clean, family = binomial()
+)
+
+res_sens2 <- tidy(fit_sens2_full, exponentiate = TRUE, conf.int = TRUE) %>%
+  filter(term == "Ratio_adj_QQ4")
+
+cat("\n敏感性分析 2 结果（额外调整总 SFA）:\n")
+cat(sprintf("  Q4 vs Q1 OR = %.2f (95%% CI: %.2f-%.2f), P = %.4f\n",
+            res_sens2$estimate, res_sens2$conf.low, res_sens2$conf.high, res_sens2$p.value))
+
+# ============================================================
+# 保存结果
+# ============================================================
+sensitivity_results <- list(
+  sens1_OR = res_sens1$estimate,
+  sens1_CI_low = res_sens1$conf.low,
+  sens1_CI_high = res_sens1$conf.high,
+  sens1_P = res_sens1$p.value,
+  sens1_trend_P = p_trend_sens1,
+  sens2_OR = res_sens2$estimate,
+  sens2_CI_low = res_sens2$conf.low,
+  sens2_CI_high = res_sens2$conf.high,
+  sens2_P = res_sens2$p.value
+)
+saveRDS(sensitivity_results, "data/sensitivity_results.rds")
+
+message("\n>>> 敏感性分析完成，结果已保存至 data/sensitivity_results.rds")
+````
+
+````bash
+# ==============================================================================
+# 第二轮审稿意见补充分析完整代码
+# 包含：增量价值、交互效应量、Ratio分布、PSM暴露差异、用药敏感性
+# ==============================================================================
+
+library(dplyr)
+library(broom)
+library(pROC)
+library(Hmisc)
+library(nhanesA)
+
+# 确保环境中存在 nhanes_clean, df_train, df_test, psm_match
+
+# ============================================================
+# 补充分析 1：膳食比值的预测增量价值（DeLong, NRI, IDI）
+# ============================================================
+message("===== 补充分析1：膳食比值增量价值 =====")
+
+# 构建含膳食比值的测试集
+df_test_with_ratio <- df_test %>%
+  inner_join(nhanes_clean %>% dplyr::select(SEQN, Ratio_adj), by = "SEQN")
+
+df_train_with_ratio <- df_train %>%
+  inner_join(nhanes_clean %>% dplyr::select(SEQN, Ratio_adj), by = "SEQN")
+
+# 训练两个模型
+fit_3var <- glm(High_CRP_num ~ Gender + BMI + TyG_Index, 
+                data = df_train, family = binomial())
+
+fit_4var <- glm(High_CRP_num ~ Gender + BMI + TyG_Index + Ratio_adj, 
+                data = df_train_with_ratio, family = binomial())
+
+# 预测
+df_test_with_ratio$pred_3var <- predict(fit_3var, newdata = df_test_with_ratio, type = "response")
+df_test_with_ratio$pred_4var <- predict(fit_4var, newdata = df_test_with_ratio, type = "response")
+
+# DeLong检验
+roc_3var <- roc(df_test_with_ratio$High_CRP_num, df_test_with_ratio$pred_3var)
+roc_4var <- roc(df_test_with_ratio$High_CRP_num, df_test_with_ratio$pred_4var)
+delong_res <- roc.test(roc_3var, roc_4var)
+
+# NRI和IDI
+nri_idi <- Hmisc::improveProb(x1 = df_test_with_ratio$pred_3var, 
+                               x2 = df_test_with_ratio$pred_4var, 
+                               y = df_test_with_ratio$High_CRP_num)
+
+cat(sprintf("DeLong P = %.4f\n", delong_res$p.value))
+print(nri_idi)
+
+# ============================================================
+# 补充分析 2：亚组交互效应量与95%CI（性别、BMI、年龄）
+# ============================================================
+message("\n===== 补充分析2：亚组交互效应 =====")
+
+nhanes_clean <- nhanes_clean %>% mutate(Ratio_Scale = Ratio_adj * 10)
+
+# 性别交互
+fit_sex <- glm(High_CRP_num ~ Ratio_Scale * Gender + Age + BMI + Smoking + Energy_Kcal,
+               data = nhanes_clean, family = binomial())
+sex_interact <- tidy(fit_sex, conf.int = TRUE) %>% filter(grepl(":", term))
+cat("\n性别交互效应:\n")
+print(sex_interact)
+
+# BMI交互（连续）
+fit_bmi <- glm(High_CRP_num ~ Ratio_Scale * BMI + Age + Gender + Smoking + Energy_Kcal,
+               data = nhanes_clean, family = binomial())
+bmi_interact <- tidy(fit_bmi, conf.int = TRUE) %>% filter(grepl(":", term))
+cat("\nBMI交互效应:\n")
+print(bmi_interact)
+
+# 年龄交互（连续）
+fit_age <- glm(High_CRP_num ~ Ratio_Scale * Age + Gender + BMI + Smoking + Energy_Kcal,
+               data = nhanes_clean, family = binomial())
+age_interact <- tidy(fit_age, conf.int = TRUE) %>% filter(grepl(":", term))
+cat("\n年龄交互效应:\n")
+print(age_interact)
+
+# ============================================================
+# 补充分析 3：Ratio 分布特征
+# ============================================================
+message("\n===== 补充分析3：Ratio分布 =====")
+cat(sprintf("Mean = %.3f\n", mean(nhanes_clean$Ratio_adj, na.rm = TRUE)))
+cat(sprintf("SD = %.3f\n", sd(nhanes_clean$Ratio_adj, na.rm = TRUE)))
+cat(sprintf("Median = %.3f\n", median(nhanes_clean$Ratio_adj, na.rm = TRUE)))
+cat(sprintf("IQR = %.3f - %.3f\n", 
+            quantile(nhanes_clean$Ratio_adj, 0.25, na.rm = TRUE), 
+            quantile(nhanes_clean$Ratio_adj, 0.75, na.rm = TRUE)))
+cat(sprintf("Min = %.3f, Max = %.3f\n", 
+            min(nhanes_clean$Ratio_adj, na.rm = TRUE), 
+            max(nhanes_clean$Ratio_adj, na.rm = TRUE)))
+
+# ============================================================
+# 补充分析 4：PSM 后暴露差异
+# ============================================================
+message("\n===== 补充分析4：PSM后暴露差异 =====")
+matched_data <- match.data(psm_match)
+q1_idx <- matched_data$Ratio_adj_Q == "Q1"
+q4_idx <- matched_data$Ratio_adj_Q == "Q4"
+cat(sprintf("Q1 Ratio_adj mean = %.3f\n", mean(matched_data$Ratio_adj[q1_idx])))
+cat(sprintf("Q4 Ratio_adj mean = %.3f\n", mean(matched_data$Ratio_adj[q4_idx])))
+cat(sprintf("Mean difference = %.3f\n", 
+            mean(matched_data$Ratio_adj[q4_idx]) - mean(matched_data$Ratio_adj[q1_idx])))
+
+# ============================================================
+# 补充分析 5：排除他汀/NSAID 用药人群
+# ============================================================
+message("\n===== 补充分析5：排除用药者 =====")
+rx_i <- nhanes('RXQ_RX_I') %>% dplyr::select(SEQN, RXDDRUG)
+rx_j <- nhanes('RXQ_RX_J') %>% dplyr::select(SEQN, RXDDRUG)
+rx_all <- bind_rows(rx_i, rx_j)
+
+statins <- unique(rx_all$RXDDRUG[grep(
+  "ATORVASTATIN|ROSUVASTATIN|SIMVASTATIN|PRAVASTATIN|LOVASTATIN|FLUVASTATIN|PITAVASTATIN",
+  rx_all$RXDDRUG, ignore.case = TRUE)])
+nsaids <- unique(rx_all$RXDDRUG[grep(
+  "IBUPROFEN|NAPROXEN|DICLOFENAC|CELECOXIB|MELOXICAM|INDOMETHACIN|KETOROLAC",
+  rx_all$RXDDRUG, ignore.case = TRUE)])
+
+rx_users <- rx_all %>% 
+  filter(RXDDRUG %in% c(statins, nsaids)) %>%
+  pull(SEQN) %>% unique()
+
+nhanes_sens_drug <- nhanes_clean %>% filter(!SEQN %in% rx_users)
+
+fit_drug_sens <- glm(High_CRP_num ~ Ratio_adj_Q + Age + Gender + Race + PIR +
+                      Smoking + Alcohol_g + MET_imp + Energy_Kcal + Total_Fat + Fiber,
+                    data = nhanes_sens_drug, family = binomial())
+res_drug_sens <- tidy(fit_drug_sens, exponentiate = TRUE, conf.int = TRUE) %>%
+  filter(term == "Ratio_adj_QQ4")
+
+cat(sprintf("纳入人数: %d\n", nrow(nhanes_sens_drug)))
+print(res_drug_sens)
+
+message("\n===== 全部补充分析完成 =====")
+
+
+fit_primary <- glm(High_CRP_num ~ Ratio_adj_Q + Age + Gender + Race + PIR +
+                    Smoking + Alcohol_g + MET_imp + Energy_Kcal + Total_Fat + Fiber,
+                  data = nhanes_clean, family = binomial())
+tidy(fit_primary, exponentiate = TRUE, conf.int = TRUE) %>% filter(grepl("Ratio_adj_Q", term))
+
+# 安装 cobalt（如果没有）
+if (!require("cobalt")) install.packages("cobalt")
+library(cobalt)
+library(ggplot2)
+
+# 创建 Love 图（比较匹配前后标准化均值差）
+p_love <- love.plot(psm_match, 
+                     binary = "std", 
+                     threshold = 0.1, 
+                     abs = TRUE,
+                     var.order = "unadjusted",
+                     line = TRUE,
+                     themes = list(
+                       theme_classic(base_size = 12) +
+                         theme(plot.title = element_text(face = "bold", hjust = 0.5),
+                               axis.title = element_text(face = "bold"),
+                               axis.text = element_text(color = "black"),
+                               legend.position = "bottom",
+                               panel.grid.major.y = element_line(color = "grey90", size = 0.3))
+                     ),
+                     colors = c("Unadjusted" = "#D55E00", "Adjusted" = "#0072B2")) +
+  labs(title = "Covariate Balance Before and After Matching",
+       x = "Absolute Standardized Mean Difference",
+       y = "")
+
+# 保存为 PDF
+ggsave("results/figures/PSM_Love_Plot.pdf", p_love, width = 8, height = 6, device = "pdf")
