@@ -91,7 +91,7 @@ No pre‑computed results are included in this repository – everything is gene
 For questions about the code or the manuscript, please contact:
 
 **Hongbo He**  
-Department of Integrated Traditional Chinese and Western Medicine Surgery  
+Division of Surgery, Institute of Integrated Traditional Chinese and Western Medicine,   
 West China Hospital, Sichuan University  
 Chengdu, China  
 Email: hhb89008684@163.com
