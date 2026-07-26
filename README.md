@@ -1,7 +1,7 @@
 # Dietary Stearic-to-Palmitic Acid Ratio and Systemic Inflammation
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.21388142.svg)]([https://doi.org/10.5281/zenodo.21388142](https://doi.org/10.5281/zenodo.21595241))
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.21388142.svg)](https://doi.org/10.5281/zenodo.21595241)
 
 This repository contains the complete analytical code for the manuscript:
 
