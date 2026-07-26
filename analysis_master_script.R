@@ -159,11 +159,9 @@ write.csv(tab1_csv, "results/tables/Table1.csv")
 # 3. Track I: Observational association (energy-adjusted ratio) ---------------
 nhanes_clean <- nhanes_clean %>%
   mutate(
-    FA16_adj = resid(lm(DR1TS160 ~ Energy_Kcal, data = nhanes_clean,
-                        na.action = na.exclude)) + mean(DR1TS160, na.rm = TRUE),
-    FA18_adj = resid(lm(DR1TS180 ~ Energy_Kcal, data = nhanes_clean,
-                        na.action = na.exclude)) + mean(DR1TS180, na.rm = TRUE),
-    Ratio_adj = FA18_adj / (FA16_adj + 0.0001)
+    Ratio_raw = DR1TS180 / (DR1TS160 + 0.0001),
+    Ratio_adj = resid(lm(Ratio_raw ~ Energy_Kcal, data = nhanes_clean,
+                         na.action = na.exclude)) + mean(Ratio_raw, na.rm = TRUE)
   )
 
 ratio_adj_q <- quantile(nhanes_clean$Ratio_adj, probs = c(0,0.25,0.5,0.75,1), na.rm=TRUE)
@@ -204,7 +202,7 @@ p_trend <- coef(summary(fit_trend))["Ratio_adj_Q_num", "Pr(>|z|)"]
 
 # 3.3 VIF
 fit_vif <- glm(
-  High_CRP_num ~ Ratio_adj_Q + FA16_adj + FA18_adj + Age + Gender + Race +
+  High_CRP_num ~ Ratio_adj_Q + DR1TS160 + DR1TS180 + Age + Gender + Race +
     PIR + BMI + Smoking + Alcohol_g + MET_imp + Total_Fat + Fiber +
     Diabetes + Hypertension,
   data = nhanes_clean, family = binomial()
@@ -861,9 +859,7 @@ sensitivity_results <- list(
 saveRDS(sensitivity_results, "data/sensitivity_results.rds")
 
 message("\n>>> 敏感性分析完成，结果已保存至 data/sensitivity_results.rds")
-````
 
-````bash
 # ==============================================================================
 # 第二轮审稿意见补充分析完整代码
 # 包含：增量价值、交互效应量、Ratio分布、PSM暴露差异、用药敏感性
@@ -1012,23 +1008,93 @@ library(ggplot2)
 
 # 创建 Love 图（比较匹配前后标准化均值差）
 p_love <- love.plot(psm_match, 
-                     binary = "std", 
-                     threshold = 0.1, 
-                     abs = TRUE,
-                     var.order = "unadjusted",
-                     line = TRUE,
-                     themes = list(
-                       theme_classic(base_size = 12) +
-                         theme(plot.title = element_text(face = "bold", hjust = 0.5),
-                               axis.title = element_text(face = "bold"),
-                               axis.text = element_text(color = "black"),
-                               legend.position = "bottom",
-                               panel.grid.major.y = element_line(color = "grey90", size = 0.3))
-                     ),
-                     colors = c("Unadjusted" = "#D55E00", "Adjusted" = "#0072B2")) +
+                    binary = "std", 
+                    thresholds = c(m = 0.1),   # 原 threshold 参数可能改为 thresholds
+                    abs = TRUE,
+                    var.order = "unadjusted",
+                    line = TRUE,
+                    themes = list(
+                      theme_classic(base_size = 12) +
+                        theme(plot.title = element_text(face = "bold", hjust = 0.5),
+                              axis.title = element_text(face = "bold"),
+                              axis.text = element_text(color = "black"),
+                              legend.position = "bottom",
+                              panel.grid.major.y = element_line(color = "grey90", linewidth = 0.3))
+                    )) +
   labs(title = "Covariate Balance Before and After Matching",
        x = "Absolute Standardized Mean Difference",
        y = "")
 
 # 保存为 PDF
 ggsave("results/figures/PSM_Love_Plot.pdf", p_love, width = 8, height = 6, device = "pdf")
+
+
+
+                      
+# 重新运行他汀/NSAID 排除敏感性分析
+library(dplyr)
+library(broom)
+library(nhanesA)
+
+rx_i <- nhanes('RXQ_RX_I') %>% dplyr::select(SEQN, RXDDRUG)
+rx_j <- nhanes('RXQ_RX_J') %>% dplyr::select(SEQN, RXDDRUG)
+rx_all <- bind_rows(rx_i, rx_j)
+
+statins <- unique(rx_all$RXDDRUG[grep(
+  "ATORVASTATIN|ROSUVASTATIN|SIMVASTATIN|PRAVASTATIN|LOVASTATIN|FLUVASTATIN|PITAVASTATIN",
+  rx_all$RXDDRUG, ignore.case = TRUE)])
+nsaids <- unique(rx_all$RXDDRUG[grep(
+  "IBUPROFEN|NAPROXEN|DICLOFENAC|CELECOXIB|MELOXICAM|INDOMETHACIN|KETOROLAC",
+  rx_all$RXDDRUG, ignore.case = TRUE)])
+
+rx_users <- rx_all %>% 
+  filter(RXDDRUG %in% c(statins, nsaids)) %>%
+  pull(SEQN) %>% unique()
+
+nhanes_sens_drug <- nhanes_clean %>% filter(!SEQN %in% rx_users)
+
+fit_drug_sens <- glm(High_CRP_num ~ Ratio_adj_Q + Age + Gender + Race + PIR +
+                      Smoking + Alcohol_g + MET_imp + Energy_Kcal + Total_Fat + Fiber,
+                    data = nhanes_sens_drug, family = binomial())
+res_drug_sens <- tidy(fit_drug_sens, exponentiate = TRUE, conf.int = TRUE) %>%
+  filter(term == "Ratio_adj_QQ4")
+
+cat(sprintf("纳入人数: %d\n", nrow(nhanes_sens_drug)))
+print(res_drug_sens)
+
+# 在已有的 df_pca 上运行
+df_pca_std <- df_pca %>%
+  mutate(across(starts_with("Pattern_"), ~ as.numeric(scale(.))))
+for (i in 1:3) {
+  f <- as.formula(paste0("High_CRP_num ~ Pattern_", i))
+  mod <- glm(f, data = df_pca_std, family = binomial)
+  res <- tidy(mod, exponentiate = TRUE, conf.int = TRUE)[2,]
+  cat(sprintf("PC%d: OR = %.2f (95%% CI %.2f-%.2f), P = %.4f\n",
+              i, res$estimate, res$conf.low, res$conf.high, coef(summary(mod))[2,4]))
+}
+
+fit_trend_full <- glm(High_CRP_num ~ Ratio_adj_Q_num + Age + Gender + Race + PIR + BMI +
+                      Smoking + Alcohol_g + MET_imp + Energy_Kcal + Total_Fat + Fiber +
+                      Diabetes + Hypertension,
+                      data = nhanes_clean, family = binomial())
+p_trend_full <- coef(summary(fit_trend_full))["Ratio_adj_Q_num", "Pr(>|z|)"]
+print(p_trend_full)
+
+
+fit_trend_full <- glm(High_CRP_num ~ Ratio_adj_Q_num + Age + Gender + Race + PIR + BMI +
+                      Smoking + Alcohol_g + MET_imp + Energy_Kcal + Total_Fat + Fiber +
+                      Diabetes + Hypertension,
+                      data = nhanes_clean, family = binomial())
+coef_trend <- coef(summary(fit_trend_full))["Ratio_adj_Q_num", ]
+or_trend_full <- exp(coef_trend["Estimate"])
+ci_trend_full <- exp(confint(fit_trend_full)["Ratio_adj_Q_num", ])
+cat(sprintf("Fully adjusted trend OR = %.2f (95%% CI: %.2f-%.2f), P = %.4f\n",
+            or_trend_full, ci_trend_full[1], ci_trend_full[2], coef_trend["Pr(>|z|)"]))
+
+
+print(pca_res$loadings, cutoff = 0.3)
+# 或者查看方差贡献
+summary(pca_res)
+
+
+
