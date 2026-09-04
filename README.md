@@ -7,7 +7,7 @@ This repository contains the complete analytical code for the manuscript:
 
 **Dietary stearic-to-palmitic acid ratio and systemic inflammation: a cross-sectional dual-track analysis with independent external validation**
 
-*Submitted to SAGE Open Medicine*
+*In preparation for submission to Medicine*
 
 ---
 
@@ -86,9 +86,7 @@ LASSO‑selected dummy variables are explicitly mapped back to original factor n
 The corrected energy‑adjustment method (raw ratio → residual adjustment) is applied.
 📦 Archived Version
 
-The version of the code that accompanies the final manuscript is permanently archived on Zenodo with the DOI:
-
-10.5281/zenodo.21388142
+The version of the code that accompanies the final manuscript is permanently archived on Zenodo. The DOI is provided in the journal article.
 
 The Zenodo archive contains a snapshot of this repository as of the date of submission, ensuring complete reproducibility of the published results.
 
